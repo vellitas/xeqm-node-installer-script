@@ -1,0 +1,13 @@
+[Unit]
+Description=XEQM Labs service node
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=%INSTALL_USERNAME%
+ExecStart=%INSTALL_ROOT%/bin/xeqm-d --non-interactive --service-node --p2p-bind-ip=0.0.0.0 %PORT_PARAMS%%OPT_PARAMS% --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seeds.xeqmlabs.com:9230
+Restart=always
+RestartSec=30s
+TimeoutSec=120
+[Install]
+WantedBy=multi-user.target
