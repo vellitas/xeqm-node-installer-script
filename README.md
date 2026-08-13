@@ -8,7 +8,7 @@ Easy setup and management of XEQM service nodes on a single Linux server.
 
 ## Requirements
 
-- Ubuntu 20.04, 22.04, or 24.04 (64-bit, x86_64 or ARM64)
+- Ubuntu 22.04 or 24.04 LTS (64-bit, x86_64 or ARM64)
 - Root or `sudo` access
 - ~2 GB disk space and ~800 MB RAM per node
 
