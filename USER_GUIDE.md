@@ -13,12 +13,12 @@ Take it one step at a time and you'll be up and running in under an hour.
 3. [Getting the Scripts](#3-getting-the-scripts)
 4. [Installing Your First Node](#4-installing-your-first-node)
 5. [Installing Multiple Nodes on One Server](#5-installing-multiple-nodes-on-one-server)
-6. [Migrating from Docker](#6-migrating-from-docker)
-7. [Completing Setup — Staking Your Node](#7-completing-setup--staking-your-node)
-8. [Daily Node Management](#8-daily-node-management)
-9. [Upgrading Your Nodes](#9-upgrading-your-nodes)
-10. [Health Checks and Auto-Repair](#10-health-checks-and-auto-repair)
-11. [Moving a Node to Another Server](#11-moving-a-node-to-another-server)
+6. [Registering and Staking Your Node](#6-registering-and-staking-your-node)
+7. [Daily Node Management](#7-daily-node-management)
+8. [Upgrading Your Nodes](#8-upgrading-your-nodes)
+9. [Health Checks and Auto-Repair](#9-health-checks-and-auto-repair)
+10. [Moving a Node to Another Server](#10-moving-a-node-to-another-server)
+11. [Unlocking a Node (Stake Release)](#11-unlocking-a-node-stake-release)
 12. [Firewall Configuration](#12-firewall-configuration)
 13. [Quiet Mode (Unattended Installs)](#13-quiet-mode-unattended-installs)
 14. [Quick Reference Card](#14-quick-reference-card)
@@ -47,7 +47,7 @@ job is to answer a few questions during installation, then stake from your walle
 
 | Requirement | Minimum | Recommended |
 |---|---|---|
-| Operating System | Ubuntu 20.04 or 22.04 | Ubuntu 22.04 LTS |
+| Operating System | Ubuntu 22.04 LTS | Ubuntu 24.04 LTS |
 | RAM | 2 GB | 4 GB |
 | Disk Space | 50 GB free | 100 GB+ SSD |
 | Network | Stable broadband | Dedicated connection |
@@ -61,11 +61,13 @@ job is to answer a few questions during installation, then stake from your walle
 Your server's firewall (or router if you use one) must allow traffic on these ports
 for **each node**:
 
-| Port | Purpose |
-|---|---|
-| **9230** | Peer-to-peer — how your node finds others |
-| **9232** | Quorumnet — service node consensus |
+| Port | Protocol | Purpose |
+|---|---|---|
+| **9230** | TCP | Peer-to-peer — how your node finds others |
+| **9232** | TCP + UDP | Quorumnet — service node consensus |
 
+> **Quorumnet requires both TCP and UDP.** Opening only TCP causes
+> "Unreachable for Timestamp Check" deregistrations.
 > Port 9231 (RPC) is for **internal use only** and must not be opened externally.
 
 If you are on a VPS (rented cloud server), these ports are usually easy to open in your
@@ -89,63 +91,52 @@ Log in to your server and run the following commands. Copy and paste them exactl
 sudo apt -y install git
 
 # Download the scripts
-git clone https://github.com/vellitas/xeqm-node-installer-script.git
+sudo git clone https://github.com/vellitas/xeqm-node-installer-script /opt/xeqm-node-installer-script
 
 # Move into the folder
-cd xeqm-node-installer-script
+cd /opt/xeqm-node-installer-script
 ```
 
 You only need to do this once. To get future updates:
 
 ```bash
-cd ~/xeqm-node-installer-script && git pull
+cd /opt/xeqm-node-installer-script && sudo git pull
 ```
 
 ---
 
 ## 4. Installing Your First Node
 
-### Step 1 — Run the installer
+### Step 1 — Launch the menu
 
 From inside the `xeqm-node-installer-script` folder, run:
 
 ```bash
-sudo bash install.sh
+sudo bash xeqm-manager.sh
 ```
 
-The installer displays a welcome screen, then launches an **interactive wizard** — a
-series of graphical dialog boxes where you navigate with the arrow keys and Tab, and
-press Enter to confirm each choice. You can press **Back** on any screen to go back
-and change a previous answer.
+This opens a full-screen interactive menu. Select **Install** and press Enter.
 
-> **No wizard?** If whiptail is not available on your system, the same questions are
-> asked as plain text prompts. The answers and defaults are identical.
+The installer launches an **interactive wizard** — a series of dialog boxes where you
+navigate with the arrow keys and Tab, and press Enter to confirm each choice. You can
+press **Back** on any screen to change a previous answer.
+
+> **No dialog boxes?** If whiptail is not available, the same questions are asked as
+> plain text prompts. The answers and defaults are identical.
 
 ---
 
 ### Step 2 — How many nodes?
 
-A dialog asks how many service nodes to install on this server. Type a number or leave
-blank to default to 1. The installer calculates the maximum your server can support
-based on available RAM and disk space and shows it in the prompt.
+A dialog asks how many service nodes to install on this server. The installer calculates
+the maximum your server can support based on available RAM and disk space and shows it
+in the prompt.
 
 For your first install, **leave blank and press Enter** to install 1 node.
 
 ---
 
-### Step 3 — Shared password (multi-node installs)
-
-A Yes/Skip dialog appears asking whether to set a shared password for all node accounts.
-
-If you are installing more than one node, choosing **Yes** lets you type one password
-in the terminal that is used for all node user accounts — so you are not prompted once
-per node. Recommended for multi-node installs.
-
-For a single-node install, choose **Skip**.
-
----
-
-### Step 4 — Choose how to get the binaries
+### Step 3 — Choose how to get the binaries
 
 ```
 ┌──────────────────────── XEQM Binaries ────────────────────────┐
@@ -162,7 +153,7 @@ for your CPU architecture.
 
 ---
 
-### Step 5 — Choose how to get the blockchain
+### Step 4 — Choose how to get the blockchain
 
 The blockchain is the complete history of all XEQM transactions. Your node needs a
 full copy before it can participate in the network.
@@ -187,7 +178,7 @@ For almost everyone, **select "Download bootstrap" and press Enter**.
 
 ---
 
-### Step 6 — Public IP address
+### Step 5 — Public IP address
 
 A dialog shows the auto-detected public IPv4 address of your server. Press Enter to
 accept it. If your server is behind a load balancer or NAT and has a different public
@@ -195,7 +186,7 @@ IP, clear the field and type the correct address.
 
 ---
 
-### Step 7 — Firewall
+### Step 6 — Firewall
 
 ```
 ┌──────────────────────────── Firewall ─────────────────────────┐
@@ -212,18 +203,29 @@ IP, clear the field and type the correct address.
 |---|---|
 | **UFW** | Standard VPS on Contabo, Hetzner, OVH, DigitalOcean, etc. |
 | **iptables** | Server without UFW installed. |
-| **Oracle Cloud (OCI)** | Oracle Cloud free-tier or paid instances. OCI ships a raw iptables REJECT rule that silently blocks ports even when UFW allows them; this option fixes it automatically. |
+| **Oracle Cloud (OCI)** | Oracle Cloud instances. OCI ships a raw iptables REJECT rule that silently blocks ports even when UFW allows them; this option fixes it automatically. |
 | **External firewall** | Your server sits behind OPNsense, pfSense, or a cloud security group. The installer prints the exact ports to open rather than touching the server's firewall. |
 
 **Select UFW** for most VPS providers. Select **Oracle Cloud** if you are on OCI.
 
 ---
 
-### Step 8 — Review and confirm
+### Step 7 — Review and confirm
 
-The wizard auto-detects free ports and usernames, fetches the latest XEQM version, and
-shows a scrollable summary of the full configuration. Review it, then advance to the
-**Confirm Installation** dialog and select **Install** to begin.
+The wizard shows a scrollable summary of your full configuration — node names, ports,
+binary version, and blockchain source. Review it, then advance to **Confirm Installation**
+and select **Install** to begin.
+
+---
+
+### Step 8 — Operator Dashboard Agent (optional)
+
+After installation completes, the wizard offers to install the **XEQM Operator Dashboard
+Agent**. This connects your server to an operator dashboard for remote monitoring and
+management from a web browser.
+
+If you have a dashboard URL and agent token, enter them here. If not, select **Skip** —
+you can add the agent later by re-running the installer.
 
 ---
 
@@ -233,11 +235,13 @@ The installer will:
 
 1. Install required system packages
 2. Download the XEQM software
-3. Set up a dedicated user account for your node
-4. Create a system service (so the node restarts automatically after reboots)
-5. Start the node and download the blockchain
+3. Create the node state directory and shared system user
+4. Install a systemd service (so the node restarts automatically after reboots)
+5. Open firewall ports
+6. Start the node and download the blockchain
 
-The blockchain download takes about 15 minutes with the bootstrap option.
+The blockchain download takes about 15 minutes with the bootstrap option. When complete,
+a summary and next-steps checklist are shown.
 
 ---
 
@@ -249,12 +253,6 @@ You can run several nodes on one server as long as it has enough RAM and disk sp
 
 ```bash
 sudo bash install.sh --nodes 5
-```
-
-### Install nodes with usernames you choose
-
-```bash
-sudo bash install.sh --nodes 3 --user snode1,snode2,snode3
 ```
 
 ### Install 2 nodes — first downloads bootstrap, second copies from first
@@ -272,228 +270,154 @@ Each node automatically gets its own set of ports. With default settings:
 
 | Node | P2P | RPC (internal only) | Quorumnet |
 |---|---|---|---|
-| Node 1 | 9230 | 9231 | 9232 |
-| Node 2 | 9330 | 9331 | 9332 |
-| Node 3 | 9430 | 9431 | 9432 |
+| snode1 | 9230 | 9231 | 9232 |
+| snode2 | 9330 | 9331 | 9332 |
+| snode3 | 9430 | 9431 | 9432 |
 
-Open ports **9230 and 9232** (and the equivalent pair for each extra node) in your firewall.
-The RPC port (9231) must stay closed to the internet.
-
----
-
-## 6. Migrating from Docker
-
-If your nodes are currently running in Docker containers, `migrate.sh` moves them to
-native systemd services without losing your node identity or blockchain data.
-
-**What it does:**
-- Auto-detects all running XEQM Docker containers on this host
-- Copies blockchain data and service node keys out of each container
-- Creates a dedicated system user per node and installs a systemd service on the same ports
-- Offers a dry-run mode so you can review the plan before anything changes
-- Prints Docker cleanup commands once migration is complete
-
-### Before you start
-
-Optionally set up a shared password first to avoid being prompted once per node:
-
-```bash
-sudo bash install.sh --one-passwd-file
-```
-
-### Run the migration
-
-Make sure your Docker containers are running, then:
-
-```bash
-sudo bash migrate.sh
-```
-
-The script walks you through everything interactively:
-
-1. Lists all detected containers with their ports, blockchain height, and data locations
-2. Lets you select which containers to migrate (all or a subset)
-3. Offers a dry run to preview the migration plan
-4. Prompts for the public IP of this server
-5. Asks how to handle firewall rules
-6. Migrates each selected node
-7. Prints Docker cleanup commands at the end
-
-After migration, each node runs as a systemd service and starts automatically on boot.
-Proceed to [Section 7](#7-completing-setup--staking-your-node) if you need to re-register any nodes.
+Open the **P2P port (TCP)** and **Quorumnet port (TCP + UDP)** for each node in your
+firewall. The RPC port must stay closed to the internet.
 
 ---
 
-## 7. Completing Setup — Staking Your Node
+## 6. Registering and Staking Your Node
 
 Installation sets up the software, but your node is **not active on the network yet**.
 You need to register it by staking XEQM from your wallet.
 
-### Step 1 — Run the prepare command
+### Step 1 — Wait for your node to sync
 
-Replace `snode1` with your node's username (shown at the end of installation):
+Your node must be fully synced before you can register it. Check its status:
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh prepare_sn'
+sudo systemctl status xeqmnode_snode1
 ```
 
-The script will ask you three questions:
+Or run the Health Check from the menu — it shows the sync progress for all nodes at once.
+
+---
+
+### Step 2 — Generate the registration command
+
+From the menu select **Register**, or run directly:
+
+```bash
+sudo bash register.sh
+```
+
+The script auto-discovers all installed nodes, checks each against the chain, and shows
+only nodes that are not yet registered. For each unregistered node it asks:
 
 **Solo or pool node?**
-```
-  [1] Solo node  — stake the full 200,000 XEQM yourself
-  [2] Pool node  — stake a portion and open to contributors (minimum 100,000 XEQM)
-```
+- **Solo**: you stake the full 200,000 XEQM yourself. Rewards go entirely to you.
+- **Pool**: you stake 100,000–200,000 XEQM and open the remainder to contributors.
 
-- **Solo**: You provide all 200,000 XEQM. Rewards go entirely to you.
-- **Pool**: You contribute 100,000–200,000 XEQM and other wallets can fill the rest.
+**Operator fee** (pool nodes only): 0–10% of rewards kept by you before splitting
+with contributors.
 
-**If pool — your contribution amount and operator fee**
-
-You will be asked how much XEQM you are contributing (100,000–200,000) and what
-percentage of rewards you keep as operator before splitting with contributors (0–10%).
-
-**Your XEQM wallet address**
-
-Paste in the wallet address you want rewards sent to.
+**Your XEQM wallet address.** Must start with `XEQM`.
 
 ---
 
-### Step 2 — Submit the registration command
+### Step 3 — Submit the command from your wallet
 
-The script generates a registration command and displays it on screen. Copy it exactly
-and submit it from your XEQM wallet to complete registration.
+The script prints a `register_service_node` command. Copy it exactly and submit it
+from your XEQM wallet CLI to complete registration.
 
 ---
 
-### Step 3 — Confirm your node is registered
+### Step 4 — Back up your node keys
 
-After staking, wait a few minutes then check your node's status:
+Each node has a unique private key. **Losing this key means losing the node.** Back
+it up immediately after install.
+
+List all node keys:
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh print_sn_status'
+sudo find /var/lib/xeqm -name 'key_ed25519' 2>/dev/null
 ```
 
-When registration is confirmed you will see your node listed as active.
+Copy a key off the server (example for snode1):
 
-> **Important:** Your node must be fully synced with the network before staking.
-> Run the `status` command to confirm the block height matches the network before proceeding.
+```bash
+sudo cat /var/lib/xeqm/snode1/key_ed25519
+```
+
+Store the output securely (password manager, encrypted backup). To move a node to a new
+server without losing its identity, use `server-migrate.sh` —
+see [Section 10](#10-moving-a-node-to-another-server).
 
 ---
 
-## 8. Daily Node Management
+## 7. Daily Node Management
 
-All management commands follow this pattern — replace `snode1` with your node's username:
-
-```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh COMMAND'
-```
+Nodes run as systemd services under the shared `xeqm` user. All standard systemd
+commands work directly.
 
 ### Check if your node is running
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh status'
+sudo systemctl status xeqmnode_snode1
 ```
 
-You will see something like:
-
-```
-Height: 1234567/1234567 (100.0%) on mainnet, not mining, net hash ...
-```
-
-The number before the `/` is your node's current block. The number after is the
-network's latest block. When they match (100%), your node is fully synced.
-
----
-
-### Start your node
+### View live logs
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
+sudo journalctl -u xeqmnode_snode1 -f
 ```
 
-> Nodes start automatically when the server boots. You only need this command
-> if you manually stopped the node or after a crash.
+Press **Ctrl+C** to stop watching.
 
----
-
-### Stop your node
+### Start / stop / restart
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop'
+sudo systemctl start   xeqmnode_snode1
+sudo systemctl stop    xeqmnode_snode1
+sudo systemctl stop    xeqmnode_snode1 && sleep 3 && sudo systemctl start xeqmnode_snode1
 ```
 
 > **Warning:** Stopping a registered node means it won't earn rewards while stopped.
 > If stopped for too long the network may deregister it.
 
----
-
-### View live logs
+### Managing all nodes at once
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh log'
+sudo systemctl stop   'xeqmnode_snode*'
+sudo systemctl start  'xeqmnode_snode*'
+sudo systemctl status 'xeqmnode_snode*'
 ```
 
-This shows a live stream of what your node is doing. Press **Ctrl+C** to stop watching.
-
----
-
-### Get your node's public key
-
-Your public key is your node's unique identity on the network. You may need it for
-staking pools or to verify your node is registered.
+### Check sync height
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh print_sn_key'
+curl -s http://127.0.0.1:9231/json_rpc \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
+  | python3 -m json.tool | grep -E 'height|status'
 ```
 
----
+When `height` matches `target_height`, your node is fully synced.
 
-### Check network registration status
-
-```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh print_sn_status'
-```
+> **Tip:** Use the **Health Check** from the menu — it shows sync status, peers, RAM,
+> registration state, and firewall rules for all nodes at once without needing to run
+> individual commands.
 
 ---
 
-### Managing multiple nodes
+## 8. Upgrading Your Nodes
 
-If you have several nodes, repeat the command for each username:
-
-```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh status'
-sudo -H -u snode2 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh status'
-```
-
-Or use [doctor.sh](#10-health-checks-and-auto-repair) to check all nodes at once.
-
----
-
-## 9. Upgrading Your Nodes
-
-When a new XEQM version is released, run the upgrade script. It automatically
-backs up your node keys before making any changes.
-
-### Upgrade one node
+When a new XEQM version is released, run the upgrade script from the menu or directly:
 
 ```bash
-bash upgrade.sh --user snode1
+sudo bash upgrade.sh
 ```
 
-### Upgrade multiple nodes at once
-
-```bash
-bash upgrade.sh --user snode1,snode2,snode3
-```
-
-The first node downloads the new software. The rest copy from it,
-so the process is much faster for node 2, 3, etc.
+All installed nodes are upgraded automatically. The binary is downloaded once and
+reused for each node.
 
 ### Upgrade to a specific version
 
 ```bash
-bash upgrade.sh --user snode1 --version v1.0.2
+sudo bash upgrade.sh --version v1.0.7
 ```
 
 > **Before upgrading:** Check the XEQM community channels for any special upgrade
@@ -501,147 +425,110 @@ bash upgrade.sh --user snode1 --version v1.0.2
 
 ---
 
-## 10. Health Checks and Auto-Repair
+## 9. Health Checks and Auto-Repair
 
-The `doctor.sh` script checks all your nodes at once and can fix common problems
-automatically.
-
-### Run a health check
+The Health Check scans all your nodes at once and can fix common problems automatically.
+Run it from the menu or directly:
 
 ```bash
-bash doctor.sh
+sudo bash doctor.sh
 ```
 
-The doctor will check every active node on your server and report on:
+### Reading the output
 
-| Check | What It Means |
+The doctor prints one row per node:
+
+| Column | What it shows |
 |---|---|
-| ✅ NTP synchronized | Your server clock is accurate (required for consensus) |
-| ✅ Disk space | Enough space for the blockchain to grow |
-| ✅ Service active | The node's system service is running |
-| ✅ Public key readable | The node can identify itself on the network |
-| ✅ Blockchain healthy | Your node's blockchain matches the network |
-
----
+| **Node** | Node name (snode1, snode2, …) |
+| **Svc** | systemd service state — `active` (green) / `inactive` / `failed` |
+| **Chain** | Sync progress — height vs network tip, or `stuck` / `no data` |
+| **Peers** | Inbound + outbound peer count — green ≥ 3, amber 1–2, red 0 |
+| **Uptime** | How long the daemon process has been running |
+| **RAM** | Current memory usage of the daemon process |
+| **Reg** | Registration state — `reg'd`, `unreg`, `unlock` (14-day lock), `sync` |
+| **FW** | Firewall check — p2p TCP, quorumnet TCP + UDP; flags missing rules |
+| **SN Key** | First 16 characters of the node's ed25519 public key |
 
 ### What the results mean
 
-**HEALTHY** — Your node is working correctly. Nothing to do.
+**active / reg'd** — Your node is working correctly. Nothing to do.
 
-**SYNCING** — Your node is downloading the blockchain. This is normal after a fresh
-install or restart. Wait for it to reach 100%.
+**sync** — Your node is downloading the blockchain. Normal after a fresh install or
+restart. Wait for it to reach network height.
 
-**CORRUPT / STUCK** — Your node's blockchain data is damaged or frozen. The doctor
-will offer to fix it automatically.
-
----
+**stuck** — Your node has stopped advancing. The doctor will offer to restart it, and
+if that doesn't help, to replace the blockchain data automatically.
 
 ### Auto-repair
 
-If a problem is found, the doctor will offer to fix it:
+If a stuck or corrupt node is detected, the doctor offers to restart it and — if still
+stuck — to replace its blockchain data:
 
-```
-Corrupt/stuck blockchains found. Auto-fix from healthy donor? [Y/N]:
-```
-
-**If you have another healthy node on the same server:** Type `Y` and press Enter.
-The doctor copies the good blockchain to the broken node — takes a few minutes.
-
-**If you have no other healthy nodes on this server:**
-
-```
-How would you like to fix the corrupt node(s)?
-
-  [1] Download bootstrap from https://bootstrap.xeqmlabs.com  (~15 min)
-  [2] Skip — I will fix manually later
-```
-
-Choose **1** to download a fresh blockchain automatically.
+- **If you have another healthy node on this server:** the doctor copies its blockchain
+  to the broken node (takes a few minutes).
+- **If not:** the doctor downloads a fresh bootstrap automatically (~15 minutes).
 
 ---
 
-### Auto-fix without prompts
+## 10. Moving a Node to Another Server
+
+If you need to move a service node — for maintenance or to consolidate servers — use
+`server-migrate.sh`. This copies the node's keys and blockchain state from a remote
+server to this one over SSH, preserving the node's identity and registration.
+
+> **Why does this matter?** Your node has a unique key. Moving the key means the new
+> server takes over as that node, keeping your stake and registration intact with no
+> lock period.
+
+### Requirements
+
+- Passwordless SSH key access from this server to the source server
+- The source server must still be running the node
+
+### Run the migration
 
 ```bash
-bash doctor.sh --auto-fix
+sudo bash server-migrate.sh
 ```
 
+The tool will:
+
+1. Prompt for the source server's hostname or IP and SSH user
+2. Test connectivity and auto-discover all nodes on the source server
+3. Let you select which node to migrate
+4. Copy the keys and blockchain data via rsync
+5. Install the node on this server and start it
+
+After migration, the source node is still running — stop it once the new server has
+synced to avoid duplicate signing.
+
 ---
 
-### Remediation plan
+## 11. Unlocking a Node (Stake Release)
 
-When the doctor finds problems it can't fix automatically, it prints a
-**Remediation Plan** — a numbered list of commands you can run yourself to resolve
-each issue. Copy and paste them one at a time.
+When you are ready to stop running a node and reclaim your staked XEQM, use the
+**Unlock** tool. This starts a 14-day unlock period during which your node continues
+to earn rewards. Your stake is returned at the end of the unlock period.
 
----
-
-## 11. Moving a Node to Another Server
-
-If you need to move a service node to a new server — for maintenance or to consolidate
-servers — use `transfer.sh`.
-
-> **Why does moving matter?** Your node has a unique key that identifies it on the
-> network. Moving the key means the new server takes over as that node, keeping your
-> stake and registration intact.
-
-### See all your nodes and their keys
+From the menu select **Unlock**, or run directly:
 
 ```bash
-bash transfer.sh --list
+sudo bash decommission.sh
 ```
 
----
+The tool shows all commissioned nodes on this server, lets you select one, confirms
+the estimated unlock date, and prints the wallet command:
 
-### Step 1 — Export the key from the old server
-
-Run this on your **old server**:
-
-```bash
-bash transfer.sh --export --user snode1
+```
+request_stake_unlock <your-node-pubkey>
 ```
 
-This creates a file like `xeqm-key-snode1-20260513120000.tar.gz` in your current
-folder. This file **is your node's identity** — keep it safe.
+Submit this command from your XEQM wallet to begin the unlock period.
 
-> **Warning:** Anyone with this file can take over your service node. Do not share it
-> or store it in a public location.
-
----
-
-### Step 2 — Copy the file to the new server
-
-One common way (run from your local computer):
-
-```bash
-scp xeqm-key-snode1-20260513120000.tar.gz youruser@new-server-ip:/home/youruser/
-```
-
----
-
-### Step 3 — Install a fresh node on the new server
-
-On the **new server**, run the installer as normal (see [Section 4](#4-installing-your-first-node)).
-The new node will get a fresh key — you will replace it in the next step.
-
----
-
-### Step 4 — Import the key on the new server
-
-```bash
-bash transfer.sh --import --user snode1 --key-file xeqm-key-snode1-20260513120000.tar.gz
-```
-
-The script will stop the node, install your original key, and restart the node.
-Your node is now running on the new server with its original identity.
-
----
-
-### Moving a key between users on the same server
-
-```bash
-bash transfer.sh --transfer --from snode1 --to snode2
-```
+> **Do not deregister a node just to move it to new hardware.** Use
+> [server-migrate.sh](#10-moving-a-node-to-another-server) instead — it carries the
+> key and state across with no lock period and no gap in rewards.
 
 ---
 
@@ -649,46 +536,45 @@ bash transfer.sh --transfer --from snode1 --to snode2
 
 ### Automatic configuration (recommended)
 
-When you run `sudo bash install.sh`, the installer asks how your firewall is managed:
-
-```
-How is the firewall managed on this server?
-
-  [1] UFW  — configure automatically  (recommended for most VPS)
-  [2] iptables  — configure automatically
-  [3] OPNsense, pfSense, or other external firewall  — show required ports
-  [4] No firewall / I will handle it manually
-```
-
-Choosing **1** or **2** configures the firewall for you automatically.
+When you run the installer, it asks how your firewall is managed and opens the correct
+ports automatically. For most VPS providers, selecting **UFW** is sufficient.
 
 ---
 
 ### Manual configuration (OPNsense, pfSense, or hardware firewalls)
 
-Choose option **3** during install and the installer will print the exact ports to open.
-For reference:
+Choose **External firewall** during install and the installer will print the exact ports
+to open. For reference:
 
-**For each service node**, allow **inbound TCP** on:
+**For each service node**, allow **inbound** on:
 
-| Service | Port | Notes |
-|---|---|---|
-| P2P | 9230 | Required — peer discovery |
-| Quorumnet | 9232 | Required — service node consensus |
+| Service | Port | Protocol | Notes |
+|---|---|---|---|
+| P2P | 9230 | TCP | Required — peer discovery |
+| Quorumnet | 9232 | TCP + UDP | Required — service node consensus |
 
-For a second node on the same server, add 100 to each port (9330, 9332).
-For a third node, add 200 (9430, 9432), and so on.
+For a second node on the same server, add 100 to each port (9330/9332).
+For a third node, add 200 (9430/9432), and so on.
 
-> **Do not open port 9231 (RPC) publicly.** This port is for internal use only
-> and should remain closed to the internet.
+> **Do not open port 9231 (RPC) publicly.** This port is for internal use only.
+
+---
+
+### Oracle Cloud (OCI)
+
+OCI has two independent firewall layers. The installer's **Oracle Cloud** option handles
+the VM-level iptables REJECT removal, but you must also open ports in the **VCN Security
+List** in the OCI Console:
+
+OCI Console → Networking → Virtual Cloud Networks → your VCN → Security Lists → Add ingress rules for each port.
 
 ---
 
 ### After changing firewall rules
 
-After opening ports, verify your node is reachable using an online port checker or
-by asking in the XEQM community. A node that is not reachable on its P2P and Quorumnet
-ports will not earn rewards and may be deregistered.
+After opening ports, run the Health Check — the **FW** column confirms each node's
+required ports are open. A node that is unreachable on its P2P and Quorumnet ports
+will not earn rewards and may be deregistered.
 
 ---
 
@@ -703,7 +589,6 @@ all required options.
 sudo bash install.sh \
   --quiet \
   --nodes 1 \
-  --user snode1 \
   --copy-blockchain bootstrap \
   --open-firewall
 ```
@@ -714,7 +599,6 @@ sudo bash install.sh \
 sudo bash install.sh \
   --quiet \
   --nodes 2 \
-  --user snode1,snode2 \
   --copy-blockchain no,auto \
   --open-firewall
 ```
@@ -722,7 +606,19 @@ sudo bash install.sh \
 ### Example: unattended upgrade
 
 ```bash
-bash upgrade.sh --user snode1,snode2
+sudo bash upgrade.sh
+```
+
+### Example: unattended install with dashboard agent
+
+```bash
+sudo bash install.sh \
+  --quiet \
+  --nodes 1 \
+  --copy-blockchain bootstrap \
+  --open-firewall \
+  --agent-url https://dashboard.example.com \
+  --agent-token YOUR_TOKEN_HERE
 ```
 
 > **Quiet mode defaults:** When `--copy-blockchain` is not specified in quiet mode,
@@ -732,121 +628,114 @@ bash upgrade.sh --user snode1,snode2
 
 ## 14. Quick Reference Card
 
+### Menu
+
+```bash
+sudo bash xeqm-manager.sh
+```
+
 ### Installation
 
 | Goal | Command |
 |---|---|
-| Install one node | `sudo bash install.sh` |
-| Install with bootstrap | `sudo bash install.sh --copy-blockchain bootstrap` |
+| Open the menu | `sudo bash xeqm-manager.sh` |
+| Install (interactive) | `sudo bash install.sh` |
+| Install 1 node, bootstrap, open firewall | `sudo bash install.sh --nodes 1 --copy-blockchain bootstrap --open-firewall` |
 | Install 3 nodes | `sudo bash install.sh --nodes 3` |
-| Preview settings before install | `sudo bash install.sh --inspect-auto-magic` |
-| Set a shared password for all node users | `sudo bash install.sh --one-passwd-file` |
-| Migrate Docker nodes to systemd | `sudo bash migrate.sh` |
-| Push script updates to all nodes | `sudo bash xeqm-node.sh sync_scripts` |
+| Upgrade all nodes | `sudo bash upgrade.sh` |
+| Upgrade to specific version | `sudo bash upgrade.sh --version v1.0.7` |
 
-### Node Management (replace `snode1` with your username)
+### Node Management (replace `snode1` with your node name)
 
 | Goal | Command |
 |---|---|
-| Check sync status | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh status'` |
-| Start node | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'` |
-| Stop node | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop'` |
-| View live logs | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh log'` |
-| Stake / register node | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh prepare_sn'` |
-| Show public key | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh print_sn_key'` |
-| Check registration status | `sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh print_sn_status'` |
+| Check status | `sudo systemctl status xeqmnode_snode1` |
+| View live logs | `sudo journalctl -u xeqmnode_snode1 -f` |
+| Start node | `sudo systemctl start xeqmnode_snode1` |
+| Stop node | `sudo systemctl stop xeqmnode_snode1` |
+| Start all nodes | `sudo systemctl start 'xeqmnode_snode*'` |
+| Stop all nodes | `sudo systemctl stop 'xeqmnode_snode*'` |
+
+### Registration & Keys
+
+| Goal | Command |
+|---|---|
+| Generate registration commands | `sudo bash register.sh` |
+| List all node keys | `sudo find /var/lib/xeqm -name 'key_ed25519'` |
+| View a node's key | `sudo cat /var/lib/xeqm/snode1/key_ed25519` |
 
 ### Health & Repair
 
 | Goal | Command |
 |---|---|
-| Check all nodes | `bash doctor.sh` |
-| Check and auto-fix without prompts | `bash doctor.sh --auto-fix` |
+| Check all nodes | `sudo bash doctor.sh` |
 
-### Upgrade
-
-| Goal | Command |
-|---|---|
-| Upgrade one node | `bash upgrade.sh --user snode1` |
-| Upgrade multiple nodes | `bash upgrade.sh --user snode1,snode2` |
-
-### Key Transfer
+### Moving & Unlocking
 
 | Goal | Command |
 |---|---|
-| List all nodes and keys | `bash transfer.sh --list` |
-| Export a node key | `bash transfer.sh --export --user snode1` |
-| Import a node key | `bash transfer.sh --import --user snode1 --key-file xeqm-key-snode1-*.tar.gz` |
-| Move key between users (same server) | `bash transfer.sh --transfer --from snode1 --to snode2` |
+| Move a node from another server | `sudo bash server-migrate.sh` |
+| Begin 14-day stake unlock | `sudo bash decommission.sh` |
+| Permanently remove all nodes | `sudo bash wipe.sh` |
 
 ---
 
 ## 15. Troubleshooting
 
-### "My node shows 0/0 for block height"
+### "My node shows height 0 or isn't syncing"
 
-The daemon may still be starting up. Wait 30–60 seconds and try the status command again.
-If it persists, check the logs:
+The daemon may still be starting up. Wait 30–60 seconds, then check the logs:
 
 ```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh log'
+sudo journalctl -u xeqmnode_snode1 -f
 ```
 
-Look for error messages near the bottom.
+Look for error messages near the bottom. If no peers are listed, ensure the P2P port
+(9230) is open in your firewall.
 
 ---
 
 ### "My node is stuck and won't sync past a certain block"
 
-Run the doctor:
+Run the Health Check:
 
 ```bash
-bash doctor.sh
+sudo bash doctor.sh
 ```
 
-If it reports CORRUPT/STUCK, choose the bootstrap option to download a fresh blockchain.
-
----
-
-### "I get 'Permission denied' when running commands"
-
-Make sure you are logged in as the same user who downloaded the scripts
-(not as a node user like snode1). Run commands from your main user account using `sudo`.
-
----
-
-### "I forgot which username my node runs under"
-
-```bash
-bash transfer.sh --list
-```
-
-This shows all active node usernames and their keys.
-
-Alternatively:
-
-```bash
-sudo ps aux | grep xeqm-d
-```
-
-The first column shows the username for each running node process.
+If it shows `stuck`, the doctor will offer to restart the node and, if that fails,
+replace the blockchain data with a fresh bootstrap automatically.
 
 ---
 
 ### "The node service won't start"
 
-Check if the service exists:
+Check the service status for an error message:
 
 ```bash
-sudo systemctl status xeqmnode_snode1.service
+sudo systemctl status xeqmnode_snode1
+sudo journalctl -u xeqmnode_snode1 --no-pager | tail -30
 ```
 
-If it says "not found", re-run the service setup:
+If the service is missing entirely, re-run the installer — it is safe to run on a
+server that already has nodes installed.
 
-```bash
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh setup_service'
-sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
-```
+---
+
+### "I get 'Permission denied' when running commands"
+
+All installer scripts must be run with `sudo`. Make sure you are on your main user
+account and prefixing commands with `sudo bash`.
+
+---
+
+### "My node won't earn rewards / keeps getting deregistered"
+
+The most common cause is a firewall blocking the Quorumnet port. Run the Health Check
+and check the **FW** column — it will show exactly which ports are missing.
+
+Quorumnet requires **both TCP and UDP** on port 9232 (and the equivalent port for each
+additional node). Opening TCP only is a common mistake.
 
 ---
 
@@ -855,21 +744,20 @@ sudo -H -u snode1 bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
 Check disk usage:
 
 ```bash
-df -h /home
+df -h /var/lib/xeqm
 ```
 
-Check how much space the blockchain is using:
+Check how much space each node's blockchain is using:
 
 ```bash
-sudo du -sh /home/snode1/.xeqmlabs
+sudo du -sh /var/lib/xeqm/snode*
 ```
 
-If multiple nodes share the same server, each has its own copy of the blockchain.
-The doctor will warn you when free space drops below 20 GB.
+The Health Check will warn when free space is running low.
 
 ---
 
-### "My server's clock is wrong and I'm seeing NTP warnings"
+### "My server's clock is wrong and I'm seeing sync warnings"
 
 ```bash
 sudo timedatectl set-ntp true
@@ -883,11 +771,11 @@ The output should show `NTP synchronized: yes`.
 
 ### "I need help"
 
-If you're stuck, please reach out in the XEQM Labs community channels.
-When asking for help, run the doctor and share the output — it gives helpers
-the information they need quickly:
+If you're stuck, please reach out in the XEQM Labs community channels. When asking for
+help, run the Health Check and share the output — it gives helpers the information they
+need quickly:
 
 ```bash
-bash doctor.sh 2>&1 | tee doctor-output.txt
+sudo bash doctor.sh 2>&1 | tee doctor-output.txt
 cat doctor-output.txt
 ```
