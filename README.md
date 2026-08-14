@@ -43,6 +43,7 @@ This opens a full-screen interactive menu with every tool:
 | **Install** | Install service nodes on this server |
 | **Health Check** | Check node health: sync, firewall ports, disk space |
 | **Register** | Generate registration commands for all unregistered nodes |
+| **Firewall** | Reconfigure firewall — switch between UFW, OCI, iptables, or external |
 | **Migrate** | Move a node from a remote server to this one |
 | **Upgrade** | Upgrade node binaries |
 | **Unlock** | Graceful 14-day stake unlock — rewards continue during the lock period |
@@ -200,10 +201,32 @@ The doctor prints a table with one row per node:
 | **Uptime** | How long the daemon process has been running |
 | **RAM** | Current resident memory of the daemon process |
 | **Reg** | Registration state — `reg'd`, `unreg`, `unlock` (14-day lock), `sync` |
-| **FW** | Firewall check — p2p TCP, quorumnet TCP+UDP; flags missing rules or OCI iptables REJECT |
+| **FW** | Firewall check — `OK` all ports open, `EXT` listening but no UFW (external firewall), `FAIL` port not reachable, `SCAN` daemon starting up (port opens after initial blockchain scan completes) |
 | **SN Key** | First 16 characters of the node's ed25519 public key |
 
 When a stuck or corrupt node is detected the doctor offers to restart it automatically before falling back to blockchain replacement.
+
+---
+
+## Reconfigure Firewall (firewall.sh)
+
+Switch firewall mode for all installed nodes without reinstalling:
+
+```bash
+sudo bash firewall.sh
+```
+
+| Mode | When to use |
+|---|---|
+| **UFW** | Moving to a VPS or any server where the host firewall should manage ports |
+| **Oracle Cloud (OCI)** | OCI VMs — UFW + removes the raw iptables REJECT rule that blocks UFW-opened ports |
+| **iptables** | Servers without UFW where you want direct iptables rules |
+| **External firewall** | OPNSense, pfSense, or any perimeter firewall — prints the full port list to configure manually |
+| **Remove UFW rules** | Moving from a VPS (UFW) to a location with an external firewall — cleans up node-specific UFW rules |
+
+The script auto-discovers all installed nodes and their ports from the systemd unit files. When enabling UFW it always opens SSH first so you cannot lock yourself out.
+
+> **Quorumnet requires both TCP and UDP.** UFW mode opens quorumnet with a combined rule covering both protocols. External firewall mode lists separate TCP and UDP entries for each node.
 
 ---
 
