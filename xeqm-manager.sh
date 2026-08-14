@@ -49,10 +49,11 @@ main() {
       local _wt_choice
       _wt_choice="$(whiptail --title "XEQM Node Manager" \
         --ok-button "Run" --cancel-button "Exit" \
-        --menu "Select a tool:" 20 80 7 \
+        --menu "Select a tool:" 22 80 8 \
         "Install"      "Set Up Service Nodes on This Server" \
         "Health Check" "Diagnose Nodes, Check Peers & Auto-Repair Issues" \
         "Register"     "Register Nodes on the XEQM Network" \
+        "Firewall"     "Reconfigure Firewall (UFW / OCI / iptables / External)" \
         "Migrate"      "Move a Node from Another Server to This One" \
         "Upgrade"      "Upgrade Node Software to the Latest Version" \
         "Unlock"       "Begin 14-Day Stake Unlock (Rewards Continue Until Release)" \
@@ -66,6 +67,7 @@ main() {
         "Install       — Set up service nodes on this server" \
         "Health Check  — Diagnose nodes, check peers & auto-repair issues" \
         "Register      — Register nodes on the XEQM network" \
+        "Firewall      — Reconfigure firewall (UFW / OCI / iptables / external)" \
         "Migrate       — Move a node from another server to this one" \
         "Upgrade       — Upgrade node software to the latest version" \
         "Unlock        — Begin 14-day stake unlock (rewards continue until release)" \
@@ -75,22 +77,24 @@ main() {
         1) choice="Install"       ;;
         2) choice="Health Check"  ;;
         3) choice="Register"      ;;
-        4) choice="Migrate"       ;;
-        5) choice="Upgrade"       ;;
-        6) choice="Unlock"        ;;
-        7) choice="Remove Nodes"  ;;
-        8) break ;;
+        4) choice="Firewall"      ;;
+        5) choice="Migrate"       ;;
+        6) choice="Upgrade"       ;;
+        7) choice="Unlock"        ;;
+        8) choice="Remove Nodes"  ;;
+        9) break ;;
       esac
     fi
 
     case "${choice}" in
-      Install)       _run_tool install.sh        ;;
-      "Health Check") _run_tool doctor.sh        ;;
-      Register)      _run_tool register.sh       ;;
-      Migrate)       _run_tool server-migrate.sh ;;
-      Upgrade)       _run_tool upgrade.sh        ;;
-      Unlock)        _run_tool decommission.sh   ;;
-      "Remove Nodes") _run_tool wipe.sh          ;;
+      Install)        _run_tool install.sh        ;;
+      "Health Check") _run_tool doctor.sh         ;;
+      Register)       _run_tool register.sh       ;;
+      Firewall)       _run_tool firewall.sh       ;;
+      Migrate)        _run_tool server-migrate.sh ;;
+      Upgrade)        _run_tool upgrade.sh        ;;
+      Unlock)         _run_tool decommission.sh   ;;
+      "Remove Nodes") _run_tool wipe.sh           ;;
     esac
   done
 }
