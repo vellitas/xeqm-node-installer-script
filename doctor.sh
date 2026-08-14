@@ -307,9 +307,19 @@ analyze_and_fix() {
         if [[ "${oci_reject}" -eq 1 ]]; then
           fw_state="fail"
         elif [[ "${p2p_listen}" -eq 0 ]]; then
-          fw_state="fail"
-          fw_issue_text+="p2p ${_np2p}/tcp not listening — check daemon config\n"
-          fw_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n"
+          # Port not open yet — check if daemon is in its initial blockchain scan
+          local _scanning=0
+          if [[ "${svc_state}" = "ok" && "${_mainpid:-0}" -gt 0 ]]; then
+            journalctl -u "${_nsvc}" --since "3 minutes ago" --no-pager -q 2>/dev/null \
+              | grep -q "scanning height" && _scanning=1 || true
+          fi
+          if [[ "${_scanning}" -eq 1 ]]; then
+            fw_state="starting"
+          else
+            fw_state="fail"
+            fw_issue_text+="p2p ${_np2p}/tcp not listening — check daemon config\n"
+            fw_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n"
+          fi
         else
           fw_state="ext"
         fi
@@ -440,7 +450,7 @@ analyze_and_fix() {
       node_issue_text+="Low disk: ${user_disk_gb} GB free, ${lmdb_gb} GB blockchain (keep 20+ GB free)\n"
       node_issue_text+="→ du -sh ${_ndata}\n\n"
     fi
-    if [[ -z "${sn_key}" ]]; then
+    if [[ -z "${sn_key}" && "${fw_state}" != "starting" ]]; then
       node_issue_text+="SN key unavailable (daemon may be down or node not yet prepared)\n"
       if [[ "${_nlayout}" = "installer" ]]; then
         node_issue_text+="→ sudo -H -u ${_nuser} bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh prepare_sn'\n\n"
@@ -449,10 +459,10 @@ analyze_and_fix() {
       fi
     fi
     local _total_peers=$(( peers_in + peers_out ))
-    if [[ "${svc_state}" = "ok" && "${_total_peers}" -eq 0 ]]; then
+    if [[ "${svc_state}" = "ok" && "${_total_peers}" -eq 0 && "${fw_state}" != "starting" ]]; then
       node_issue_text+="No peers — daemon is isolated from the network\n"
       node_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n\n"
-    elif [[ "${svc_state}" = "ok" && "${_total_peers}" -lt 3 ]]; then
+    elif [[ "${svc_state}" = "ok" && "${_total_peers}" -lt 3 && "${fw_state}" != "starting" ]]; then
       node_issue_text+="# Low peer count (${_total_peers}) — monitor for network isolation\n\n"
     fi
     if [[ "${chain_state}" = "stuck" ]]; then
@@ -568,13 +578,18 @@ analyze_and_fix() {
       "sync")   _reg_txt="\033[0;90m${_reg_txt}\033[0m" ;;
     esac
 
-    local _fw_label="${d_fw_state[$i]^^}"
+    local _fw_label
+    case "${d_fw_state[$i]}" in
+      starting) _fw_label="SCAN" ;;
+      *)        _fw_label="${d_fw_state[$i]^^}" ;;
+    esac
     _fw_txt="$(printf "%-${W_FW}s" "${_fw_label}")"
     case "${d_fw_state[$i]}" in
-      ok)   _fw_txt="\033[0;32m${_fw_txt}\033[0m" ;;
-      fail) _fw_txt="\033[0;31m${_fw_txt}\033[0m" ;;
-      ext)  _fw_txt="\033[0;33m${_fw_txt}\033[0m" ;;
-      skip) _fw_txt="\033[0;33m${_fw_txt}\033[0m" ;;
+      ok)       _fw_txt="\033[0;32m${_fw_txt}\033[0m" ;;
+      fail)     _fw_txt="\033[0;31m${_fw_txt}\033[0m" ;;
+      ext)      _fw_txt="\033[0;33m${_fw_txt}\033[0m" ;;
+      skip)     _fw_txt="\033[0;33m${_fw_txt}\033[0m" ;;
+      starting) _fw_txt="\033[0;90m${_fw_txt}\033[0m" ;;
     esac
 
     local _name_txt
