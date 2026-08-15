@@ -1154,13 +1154,18 @@ install_dependencies() {
     command -v openssl  >/dev/null 2>&1 || _missing+=(openssl)
     command -v rsync    >/dev/null 2>&1 || _missing+=(rsync)
     command -v wget     >/dev/null 2>&1 || _missing+=(wget)
-    # newt provides whiptail on macOS (BSD awk built-in is sufficient, no gawk needed)
+    # newt provides whiptail; grep provides GNU grep with -P/PCRE support
     command -v whiptail >/dev/null 2>&1 || _missing+=(newt)
+    # BSD grep lacks -P (PCRE); install GNU grep which the scripts use heavily
+    grep -P '' /dev/null 2>/dev/null || _missing+=(grep)
     if [[ ${#_missing[@]} -gt 0 ]]; then
       echo -e "\n\033[1mInstalling missing dependencies via Homebrew: ${_missing[*]}\033[0m"
       HOMEBREW_NO_REQUIRE_TAP_TRUST=1 HOMEBREW_NO_AUTO_UPDATE=1 \
         brew install --quiet "${_missing[@]}" <<< "y"
     fi
+    # Add GNU grep (and any other gnubin tools) to front of PATH immediately
+    local _gnubin="/opt/homebrew/opt/grep/libexec/gnubin"
+    [[ -d "${_gnubin}" ]] && export PATH="${_gnubin}:${PATH}"
     return 0
   fi
 

@@ -47,6 +47,9 @@ git_repository_option_value=
 declare -A system_info
 
 detect_and_migrate_installer_nodes() {
+  # Old installer layout only existed on Linux — skip entirely on macOS
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
   # Scan for installer-layout nodes: OS users whose home is /home/snodeN and whose
   # unit file has User=snodeN (not User=xeqm).
   local -a _installer_nodes=()

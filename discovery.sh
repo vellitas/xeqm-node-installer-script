@@ -4,14 +4,24 @@ readonly _XEQM_DISCOVERY_LOADED=1
 
 discover_system() {
   declare -n ds__result="$1"
-  ds__result[distro]="$(lsb_release -a 2> /dev/null | grep -oP 'Distributor ID:\t+\K[a-zA-Z0-9-_\s]+' | awk '{ print tolower($1) }')"
-  ds__result[release]="$(lsb_release -a 2>/dev/null | grep 'Release:' | awk '{ print $2 }')"
-  ds__result[codename]="$(lsb_release -a 2>/dev/null | grep -oP 'Codename:\t+\K[a-zA-Z0-9-_\s]+')"
-  ds__result[memory]="$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{ print $2 }')"
-  ds__result[free_space_root_mount]="$(df /root | awk 'END{ print $4 }')"
-  ds__result[free_space_home_mount]="$(df /home | awk 'END{ print $4 }')"
-  ds__result[free_space_var_lib]="$(df /var/lib 2>/dev/null | awk 'END{ print $4 }' || df / | awk 'END{ print $4 }')"
-
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    ds__result[distro]="macos"
+    ds__result[release]="$(sw_vers -productVersion 2>/dev/null || true)"
+    ds__result[codename]=""
+    # sysctl hw.memsize returns bytes; convert to kB to match Linux /proc/meminfo units
+    ds__result[memory]="$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)"
+    ds__result[free_space_root_mount]="$(df / | awk 'END{ print $4 }')"
+    ds__result[free_space_home_mount]="$(df ~ | awk 'END{ print $4 }')"
+    ds__result[free_space_var_lib]="$(df ~ | awk 'END{ print $4 }')"
+  else
+    ds__result[distro]="$(lsb_release -a 2> /dev/null | grep -oP 'Distributor ID:\t+\K[a-zA-Z0-9-_\s]+' | awk '{ print tolower($1) }')"
+    ds__result[release]="$(lsb_release -a 2>/dev/null | grep 'Release:' | awk '{ print $2 }')"
+    ds__result[codename]="$(lsb_release -a 2>/dev/null | grep -oP 'Codename:\t+\K[a-zA-Z0-9-_\s]+')"
+    ds__result[memory]="$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{ print $2 }')"
+    ds__result[free_space_root_mount]="$(df /root | awk 'END{ print $4 }')"
+    ds__result[free_space_home_mount]="$(df /home | awk 'END{ print $4 }')"
+    ds__result[free_space_var_lib]="$(df /var/lib 2>/dev/null | awk 'END{ print $4 }' || df / | awk 'END{ print $4 }')"
+  fi
   return 0
 }
 
@@ -23,50 +33,47 @@ discover_daemons() {
   while read -r line; do
     dd__result[${idx}]="${line}"
     idx=$((idx + 1))
-  done <<< "$(sudo ps -f -o "${output_column}" -o args -ax | grep -e '[b]in/xeqm-d.*--service-node' | gawk '{ print $1 }' | natsort | uniq )"
+  done <<< "$(ps -f -o "${output_column}" -o args -ax 2>/dev/null | grep -e '[b]in/xeqm-d.*--service-node' | awk '{ print $1 }' | natsort | uniq )"
 
   return 0
 }
 
+_stat_size() { # cross-platform file size in bytes
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then stat -f %z "$1" 2>/dev/null || echo 0
+  else stat -c %s "$1" 2>/dev/null || echo 0; fi
+}
+
 discover_biggest_blockchain() {
-  declare -A daemon_users
+  local biggest_blockchain="" biggest_blockchain_size=0
+  local blockchain_root blockchain_file blockchain_size
 
-  discover_daemons daemon_users 'user'
+  # On macOS nodes live in ~/xeqm/snodeN/; on Linux in /var/lib/xeqm/snodeN/
+  local _search_root="${XEQM_STATE_BASE}"
 
-  local biggest_blockchain blockchain_file blockchain_size blockchain_root
-  local biggest_blockchain_size=0
-  biggest_blockchain=
-
-  for username in "${daemon_users[@]}"
-  do
-    if [[ -d "/home/${username}/.xeqmlabs" ]]; then
-      # Installer layout
-      blockchain_root="/home/${username}/.xeqmlabs"
-    else
-      # Canonical layout: search /var/lib/xeqm/*/lmdb
-      local best_canonical="" best_canonical_size=0
-      while IFS= read -r mdb_file; do
-        local sz
-        sz="$(stat -c %s "${mdb_file}" 2>/dev/null || echo 0)"
-        if [[ "${sz}" -gt "${best_canonical_size}" ]]; then
-          best_canonical_size="${sz}"
-          best_canonical="$(dirname "$(dirname "${mdb_file}")")"
-        fi
-      done < <(find /var/lib/xeqm -maxdepth 3 -name 'data.mdb' 2>/dev/null)
-      blockchain_root="${best_canonical}"
+  while IFS= read -r mdb_file; do
+    local sz; sz="$(_stat_size "${mdb_file}")"
+    if [[ "${sz}" -gt "${biggest_blockchain_size}" ]]; then
+      biggest_blockchain_size="${sz}"
+      biggest_blockchain="$(dirname "$(dirname "${mdb_file}")")"
     fi
+  done < <(find "${_search_root}" -maxdepth 3 -name 'data.mdb' 2>/dev/null)
 
-    [[ -z "${blockchain_root}" ]] && continue
-    blockchain_file="${blockchain_root}/lmdb/data.mdb"
-    [[ ! -f "${blockchain_file}" ]] && continue
+  # Also check old installer layout on Linux
+  if [[ "${OS_TYPE}" != "Darwin" ]]; then
+    declare -A daemon_users
+    discover_daemons daemon_users 'user'
+    for username in "${daemon_users[@]}"; do
+      [[ -d "/home/${username}/.xeqmlabs" ]] || continue
+      blockchain_file="/home/${username}/.xeqmlabs/lmdb/data.mdb"
+      [[ -f "${blockchain_file}" ]] || continue
+      blockchain_size="$(_stat_size "${blockchain_file}")"
+      if [[ "${blockchain_size}" -gt "${biggest_blockchain_size}" ]]; then
+        biggest_blockchain="/home/${username}/.xeqmlabs"
+        biggest_blockchain_size="${blockchain_size}"
+      fi
+    done
+  fi
 
-    blockchain_size="$(stat -c %s "${blockchain_file}")"
-
-    if [[ "${blockchain_size}" -gt "${biggest_blockchain_size}" ]]; then
-      biggest_blockchain="${blockchain_root}"
-      biggest_blockchain_size="${blockchain_size}"
-    fi
-  done
   echo "${biggest_blockchain}"
 }
 
@@ -108,7 +115,9 @@ validate_port() {
 
   if [ "${port}" -lt 5000 ] || [ "${port}" -gt 49151 ]; then
     echo "outside_port_range"
-  elif [[ "$(sudo ss -lnp 2>/dev/null | grep -c ":${port}[^0-9]")" -gt 0 ]]; then
+  elif [[ "${OS_TYPE}" == "Darwin" ]] && lsof -nP -iTCP:"${port}" -iUDP:"${port}" 2>/dev/null | grep -q LISTEN; then
+    echo "port_used"
+  elif [[ "${OS_TYPE}" != "Darwin" ]] && [[ "$(sudo ss -lnp 2>/dev/null | grep -c ":${port}[^0-9]")" -gt 0 ]]; then
     echo "port_used"
   else
     echo "free_port"
