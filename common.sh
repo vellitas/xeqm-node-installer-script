@@ -49,6 +49,28 @@ installer_state=(
 )
 readonly installer_state
 
+# ── Platform detection ────────────────────────────────────────────────────────
+OS_TYPE="$(uname -s)"   # Linux | Darwin
+OS_ARCH="$(uname -m)"   # x86_64 | arm64 | aarch64
+readonly OS_TYPE OS_ARCH
+
+if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    XEQM_BIN_DIR="${HOME}/xeqm-bin"
+    XEQM_STATE_BASE="${HOME}/xeqm"
+    XEQM_SVC_DIR="${HOME}/Library/LaunchAgents"
+    XEQM_SVC_LABEL_PREFIX="com.xeqmlabs"
+    XEQM_RUN_USER="${USER}"
+    _SUDO=""
+else
+    XEQM_BIN_DIR="/opt/xeqm/bin"
+    XEQM_STATE_BASE="/var/lib/xeqm"
+    XEQM_SVC_DIR="/etc/systemd/system"
+    XEQM_SVC_LABEL_PREFIX="xeqmnode"
+    XEQM_RUN_USER="xeqm"
+    _SUDO="sudo"
+fi
+readonly XEQM_BIN_DIR XEQM_STATE_BASE XEQM_SVC_DIR XEQM_SVC_LABEL_PREFIX XEQM_RUN_USER _SUDO
+
 typeset -A default_service_node_ports
 default_service_node_ports=(
   [p2p_bind_port]=9230
@@ -123,6 +145,18 @@ pre_install_checks () {
 
 inspect_time_services () {
   [[ "${XEQM_FROM_MENU:-0}" != "1" ]] && echo -e "\n\033[1mChecking clock NTP synchronisation...\033[0m"
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    # macOS: sntp is available; a non-zero offset >1s is a warning but not a hard stop
+    local _offset
+    _offset="$(sntp -t 2 time.apple.com 2>/dev/null | grep -o '[+-][0-9]*\.[0-9]*' | head -1 || true)"
+    if [[ -z "${_offset}" ]]; then
+      echo -e "  \033[0;33mWARNING:\033[0m Could not verify NTP offset — ensure system clock is synced in System Settings → General → Date & Time."
+    else
+      echo -e "  NTP offset: ${_offset}s — clock synced."
+    fi
+    return 0
+  fi
 
   if [[ -x "$(command -v timedatectl)" ]]; then
     if [[ $(sudo timedatectl | grep -o -e 'synchronized: yes' -e 'service: active' | wc -l) -ne 2 ]]; then
@@ -296,6 +330,14 @@ prompt_menu() {
 }
 
 prompt_firewall_mode() {
+  # macOS: no UFW/iptables; ports must be opened in the router or macOS firewall externally
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    config[firewall_mode]='external'
+    config[open_firewall]=0
+    echo -e "  macOS detected — firewall mode set to external. Open required ports in your router or macOS firewall manually."
+    return 0
+  fi
+
   # Auto-detect: if ufw is installed and active, skip the prompt entirely
   if command -v ufw &>/dev/null && sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
     config[firewall_mode]='ufw'
@@ -407,15 +449,19 @@ setup_running_user() {
 
 find_existing_binaries_on_server() {
   local -n febos__result="$1"
-  # Check canonical layout first
-  if [[ -x "/opt/xeqm/bin/xeqm-d" ]]; then
-    febos__result="/opt/xeqm/bin"
-    return 0
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    if [[ -x "${XEQM_BIN_DIR}/xeqm-d" ]]; then
+      febos__result="${XEQM_BIN_DIR}"; return 0
+    fi
+  else
+    if [[ -x "/opt/xeqm/bin/xeqm-d" ]]; then
+      febos__result="/opt/xeqm/bin"; return 0
+    fi
+    local bin_dir
+    for bin_dir in /home/snode*/bin; do
+      [[ -x "${bin_dir}/xeqm-d" ]] && febos__result="${bin_dir}" && return 0
+    done
   fi
-  local bin_dir
-  for bin_dir in /home/snode*/bin; do
-    [[ -x "${bin_dir}/xeqm-d" ]] && febos__result="${bin_dir}" && return 0
-  done
   febos__result=""
   return 0
 }
@@ -425,10 +471,16 @@ find_existing_binaries_on_server() {
 next_snode_slot() {
   local n=1
   while [[ "${n}" -le 200 ]]; do
-    if [[ ! -d "/var/lib/xeqm/snode${n}" ]] && \
-       ! systemctl cat "xeqmnode_snode${n}.service" >/dev/null 2>&1; then
-      echo "${n}"
-      return 0
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      if [[ ! -d "${XEQM_STATE_BASE}/snode${n}" ]] && \
+         ! launchctl list 2>/dev/null | awk '{print $3}' | grep -qF "$(svc_label "snode${n}")"; then
+        echo "${n}"; return 0
+      fi
+    else
+      if [[ ! -d "/var/lib/xeqm/snode${n}" ]] && \
+         ! systemctl cat "xeqmnode_snode${n}.service" >/dev/null 2>&1; then
+        echo "${n}"; return 0
+      fi
     fi
     n=$(( n + 1 ))
   done
@@ -437,20 +489,120 @@ next_snode_slot() {
 }
 
 ensure_xeqm_user() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    return 0  # macOS: run as current user, no system user needed
+  fi
   if ! id -u xeqm >/dev/null 2>&1; then
     echo -e "\n\033[1mCreating shared system user 'xeqm'...\033[0m"
     sudo useradd --system --no-create-home --shell /usr/sbin/nologin xeqm
   fi
 }
 
+# ── Service management abstraction (Linux: systemd  macOS: launchd) ───────────
+
+svc_label() {
+  # Linux → "xeqmnode_snode1"   macOS → "com.xeqmlabs.snode1"
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo "${XEQM_SVC_LABEL_PREFIX}.${1}"
+  else
+    echo "xeqmnode_${1}"
+  fi
+}
+
+svc_plist_path() { echo "${XEQM_SVC_DIR}/$(svc_label "${1}").plist"; }
+
+svc_start() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    launchctl start "$(svc_label "${1}")"
+  else
+    sudo systemctl start "xeqmnode_${1}"
+  fi
+}
+
+svc_stop() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    launchctl stop "$(svc_label "${1}")"
+  else
+    sudo systemctl stop "xeqmnode_${1}"
+  fi
+}
+
+svc_is_active() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    local _pid
+    _pid="$(launchctl list 2>/dev/null | awk '$3 == "'"$(svc_label "${1}")"'" { print $1 }')"
+    [[ -n "${_pid}" && "${_pid}" != "-" ]]
+  else
+    systemctl is-active --quiet "xeqmnode_${1}" 2>/dev/null
+  fi
+}
+
+svc_status() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    local _pid
+    _pid="$(launchctl list 2>/dev/null | awk '$3 == "'"$(svc_label "${1}")"'" { print $1 }')"
+    if [[ -n "${_pid}" && "${_pid}" != "-" ]]; then echo "running"
+    elif launchctl list 2>/dev/null | awk '{print $3}' | grep -qF "$(svc_label "${1}")"; then echo "stopped"
+    else echo "inactive"
+    fi
+  else
+    systemctl is-active "xeqmnode_${1}" 2>/dev/null || echo "inactive"
+  fi
+}
+
+svc_enable() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    mkdir -p "${XEQM_SVC_DIR}"
+    launchctl load "$(svc_plist_path "${1}")" 2>/dev/null || true
+  else
+    sudo systemctl enable "xeqmnode_${1}"
+  fi
+}
+
+svc_disable() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    launchctl unload "$(svc_plist_path "${1}")" 2>/dev/null || true
+  else
+    sudo systemctl disable "xeqmnode_${1}"
+  fi
+}
+
+svc_reload_daemon() {
+  [[ "${OS_TYPE}" != "Darwin" ]] && sudo systemctl daemon-reload || true
+}
+
+svc_mainpid() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    launchctl list 2>/dev/null | awk '$3 == "'"$(svc_label "${1}")"'" { print $1 }' \
+      | grep -v '^-$' || echo ""
+  else
+    systemctl show -p MainPID --value "xeqmnode_${1}" 2>/dev/null || echo ""
+  fi
+}
+
+svc_logs() {
+  local snode="$1"; shift
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    local _logfile="${XEQM_STATE_BASE}/${snode}/xeqm-d.log"
+    # If -f is in args, follow the log file; otherwise tail static
+    if [[ " $* " == *" -f "* ]]; then
+      tail -f "${_logfile}"
+    else
+      tail -n 200 "${_logfile}" 2>/dev/null || true
+    fi
+  else
+    sudo journalctl -u "xeqmnode_${snode}" "$@"
+  fi
+}
+
 install_binary_to_opt() {
   local binary_source="${config[binary_source]}"
   local version="${config[install_version]}"
-  local opt_bin="/opt/xeqm/bin"
+  local opt_bin="${XEQM_BIN_DIR}"
   local versioned_bin="${opt_bin}/xeqm-d-${version}"
   local symlink="${opt_bin}/xeqm-d"
 
-  sudo mkdir -p "${opt_bin}"
+  ${_SUDO} mkdir -p "${opt_bin}"
 
   # When version=auto, reuse existing symlink if present rather than re-downloading/compiling.
   if [[ "${version}" = "auto" && -x "${symlink}" && "${config[force_install]:-0}" -ne 1 ]]; then
@@ -471,10 +623,10 @@ install_binary_to_opt() {
     esac
     if [[ "${arch_ok}" -eq 0 ]]; then
       echo -e "\n  \033[0;33mwarn\033[0m: Existing binary ${versioned_bin} is wrong architecture for ${host_arch} — removing and re-downloading." >&2
-      sudo rm -f "${versioned_bin}"
+      ${_SUDO} rm -f "${versioned_bin}"
     else
       echo -e "\n  Binary ${versioned_bin} already installed — skipping download."
-      sudo ln -sf "${versioned_bin}" "${symlink}"
+      ${_SUDO} ln -sf "${versioned_bin}" "${symlink}"
       return 0
     fi
   fi
@@ -484,26 +636,26 @@ install_binary_to_opt() {
   elif [[ "${binary_source}" = "download" ]]; then
     local bins_path _bin _bname
     bins_path="$(download_release_binaries)"
-    sudo cp "${bins_path}/xeqm-d" "${versioned_bin}"
-    sudo chmod 755 "${versioned_bin}"
+    ${_SUDO} cp "${bins_path}/xeqm-d" "${versioned_bin}"
+    ${_SUDO} chmod 755 "${versioned_bin}"
     for _bin in "${bins_path}"/*; do
       [[ -f "${_bin}" && -x "${_bin}" ]] || continue
       _bname="$(basename "${_bin}")"
       [[ "${_bname}" = "xeqm-d" ]] && continue
-      sudo cp "${_bin}" "${opt_bin}/${_bname}"
-      sudo chmod 755 "${opt_bin}/${_bname}"
+      ${_SUDO} cp "${_bin}" "${opt_bin}/${_bname}"
+      ${_SUDO} chmod 755 "${opt_bin}/${_bname}"
     done
     rm -rf "$(dirname "${bins_path}")"
   elif [[ -n "${binary_source}" && -x "${binary_source}/xeqm-d" ]]; then
     local _bin _bname
-    sudo cp "${binary_source}/xeqm-d" "${versioned_bin}"
-    sudo chmod 755 "${versioned_bin}"
+    ${_SUDO} cp "${binary_source}/xeqm-d" "${versioned_bin}"
+    ${_SUDO} chmod 755 "${versioned_bin}"
     for _bin in "${binary_source}"/*; do
       [[ -f "${_bin}" && -x "${_bin}" ]] || continue
       _bname="$(basename "${_bin}")"
       [[ "${_bname}" = "xeqm-d" ]] && continue
-      sudo cp "${_bin}" "${opt_bin}/${_bname}"
-      sudo chmod 755 "${opt_bin}/${_bname}"
+      ${_SUDO} cp "${_bin}" "${opt_bin}/${_bname}"
+      ${_SUDO} chmod 755 "${opt_bin}/${_bname}"
     done
   else
     echo -e "\033[0;31merror\033[0m: Binary source '${binary_source}' is not valid or xeqm-d not found."
@@ -517,18 +669,18 @@ install_binary_to_opt() {
   local arch_ok=0
   case "${host_arch}" in
     x86_64)  echo "${bin_arch}" | grep -qiE 'x86-64|x86_64' && arch_ok=1 ;;
-    aarch64) echo "${bin_arch}" | grep -qiE 'aarch64|arm64'  && arch_ok=1 ;;
+    aarch64|arm64) echo "${bin_arch}" | grep -qiE 'aarch64|arm64'  && arch_ok=1 ;;
     *)       arch_ok=1 ;;  # unknown host arch — skip check
   esac
   if [[ "${arch_ok}" -eq 0 ]]; then
-    sudo rm -f "${versioned_bin}"
+    ${_SUDO} rm -f "${versioned_bin}"
     echo -e "\033[0;31merror\033[0m: Downloaded binary is not compatible with this host (${host_arch})." >&2
     echo -e "  file reports: ${bin_arch}" >&2
     echo -e "  The existing installation has NOT been modified." >&2
     exit 1
   fi
 
-  sudo ln -sf "${versioned_bin}" "${symlink}"
+  ${_SUDO} ln -sf "${versioned_bin}" "${symlink}"
   echo -e "\n  \033[1;32mBinary installed:\033[0m ${versioned_bin}"
   echo -e "  \033[1;32mSymlink updated:\033[0m  ${symlink} -> ${versioned_bin}"
 }
@@ -593,14 +745,28 @@ compile_binary_to_opt() {
   local build_dir="/tmp/xeqm-build-$$"
 
   echo -e "\n\033[1mCompiling XEQM from source...\033[0m"
-  sudo apt-get -y install build-essential cmake pkg-config libboost-all-dev libssl-dev \
-    libzmq3-dev libunbound-dev libsodium-dev libunwind8-dev liblzma-dev libreadline6-dev \
-    libldns-dev libexpat1-dev doxygen graphviz libpgm-dev qttools5-dev-tools \
-    libhidapi-dev libusb-dev libprotobuf-dev protobuf-compiler
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    if ! command -v brew >/dev/null 2>&1; then
+      echo -e "\033[0;31merror\033[0m: Homebrew is required to compile on macOS. Install from https://brew.sh" >&2
+      exit 1
+    fi
+    echo -e "  Installing build dependencies via Homebrew..."
+    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config 2>/dev/null || true
+    local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
+    local _expat_root; _expat_root="$(brew --prefix expat)"
+    local _cmake_extra="-DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    local _nproc; _nproc="$(sysctl -n hw.logicalcpu)"
+  else
+    sudo apt-get -y install build-essential cmake pkg-config libboost-all-dev libssl-dev \
+      libzmq3-dev libunbound-dev libsodium-dev libunwind8-dev liblzma-dev libreadline6-dev \
+      libldns-dev libexpat1-dev doxygen graphviz libpgm-dev qttools5-dev-tools \
+      libhidapi-dev libusb-dev libprotobuf-dev protobuf-compiler
+    local _cmake_extra=""
+    local _nproc; _nproc="$(nproc)"
+  fi
 
   mkdir -p "${build_dir}"
-  # Run entire build in a subshell so cd changes are isolated and build_dir
-  # is always cleaned up on success or failure.
   local built_bin=""
   built_bin="$(
     set -euo pipefail
@@ -609,21 +775,78 @@ compile_binary_to_opt() {
     cd xeqm-core
     git submodule init && git submodule update
     git checkout "${config[install_version]}"
-    mkdir -p build/Linux/release
-    cd build/Linux/release
-    cmake -D CMAKE_BUILD_TYPE=Release ../../..
-    make -j"$(nproc)"
+    mkdir -p build && cd build
+    cmake -DCMAKE_BUILD_TYPE=Release ${_cmake_extra} ..
+    make -j"${_nproc}" daemon
     find "${build_dir}" -name "xeqm-d" -type f | head -1
   )" || { rm -rf "${build_dir}"; echo -e "\033[0;31merror\033[0m: compile failed." >&2; exit 1; }
 
   rm -rf "${build_dir}"
-
   if [[ -z "${built_bin}" ]]; then
-    echo -e "\033[0;31merror\033[0m: xeqm-d binary not found after compile." >&2
-    exit 1
+    echo -e "\033[0;31merror\033[0m: xeqm-d binary not found after compile." >&2; exit 1
   fi
-  sudo cp "${built_bin}" "${versioned_bin}"
-  sudo chmod 755 "${versioned_bin}"
+  ${_SUDO} cp "${built_bin}" "${versioned_bin}"
+  ${_SUDO} chmod 755 "${versioned_bin}"
+}
+
+write_canonical_plist() {
+  local snode_name="$1"
+  local p2p="$2"
+  local rpc="$3"
+  local qnet="$4"
+  local public_ip="$5"
+  local log_level="${6:-}"
+  local data_dir="${XEQM_STATE_BASE}/${snode_name}"
+  local label="${XEQM_SVC_LABEL_PREFIX}.${snode_name}"
+  local plist_path="${XEQM_SVC_DIR}/${label}.plist"
+  local bin="${XEQM_BIN_DIR}/xeqm-d"
+  local log_file="${data_dir}/xeqm-d.log"
+
+  mkdir -p "${data_dir}"
+
+  local log_level_arg=""
+  [[ -n "${log_level}" ]] && log_level_arg="
+		<string>--log-level</string>
+		<string>${log_level}</string>"
+
+  cat > "${plist_path}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>${label}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>${bin}</string>
+		<string>--non-interactive</string>
+		<string>--data-dir=${data_dir}</string>
+		<string>--service-node</string>
+		<string>--p2p-bind-ip=0.0.0.0</string>
+		<string>--p2p-bind-port=${p2p}</string>
+		<string>--rpc-admin=127.0.0.1:${rpc}</string>
+		<string>--quorumnet-port=${qnet}</string>
+		<string>--service-node-public-ip=${public_ip}</string>
+		<string>--seed-node=seeds.xeqmlabs.com:9230</string>
+		<string>--add-priority-node=seeds.xeqmlabs.com:9230</string>${log_level_arg}
+	</array>
+	<key>WorkingDirectory</key>
+	<string>${data_dir}</string>
+	<key>StandardOutPath</key>
+	<string>${log_file}</string>
+	<key>StandardErrorPath</key>
+	<string>${log_file}</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>
+EOF
+
+  echo -e "  Plist written: ${plist_path}"
 }
 
 write_canonical_unit() {
@@ -633,6 +856,12 @@ write_canonical_unit() {
   local qnet="$4"
   local public_ip="$5"
   local log_level="${6:-}"
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    write_canonical_plist "${snode_name}" "${p2p}" "${rpc}" "${qnet}" "${public_ip}" "${log_level}"
+    return
+  fi
+
   local data_dir="/var/lib/xeqm/${snode_name}"
   local unit_file="/etc/systemd/system/xeqmnode_${snode_name}.service"
 
@@ -851,6 +1080,27 @@ wt_scrolltext() {
 
 # ── Dependency installer ──────────────────────────────────────────────────────
 install_dependencies() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    if ! command -v brew >/dev/null 2>&1; then
+      echo -e "\n\033[0;31merror\033[0m: Homebrew is required. Install from https://brew.sh" >&2
+      exit 1
+    fi
+    local _missing=()
+    command -v openssl >/dev/null 2>&1 || _missing+=(openssl)
+    command -v gawk    >/dev/null 2>&1 || _missing+=(gawk)
+    command -v rsync   >/dev/null 2>&1 || _missing+=(rsync)
+    # natsort via pip (no brew formula); whiptail not available on macOS — menus fall back to plain prompts
+    if ! python3 -c "import natsort" 2>/dev/null; then
+      echo -e "\n\033[1mInstalling natsort python package...\033[0m"
+      pip3 install --quiet natsort
+    fi
+    if [[ ${#_missing[@]} -gt 0 ]]; then
+      echo -e "\n\033[1mInstalling missing dependencies via Homebrew: ${_missing[*]}\033[0m"
+      brew install "${_missing[@]}"
+    fi
+    return 0
+  fi
+
   if ! [[ -x "$(command -v ss)" && -x "$(command -v openssl)" && -x "$(command -v natsort)" && \
           -x "$(command -v grep)" && -x "$(command -v getopt)" && -x "$(command -v gawk)" && \
           -x "$(command -v whiptail)" && -x "$(command -v rsync)" ]]; then
@@ -876,10 +1126,18 @@ download_bootstrap() {
     local _remote_date _remote_epoch _local_epoch
     _remote_date="$(wget --server-response --spider "${bootstrap_url}" 2>&1 \
       | grep -i 'Last-Modified:' | tail -1 | sed 's/.*Last-Modified: //' | tr -d '\r')" || true
-    _local_epoch="$(stat -c %Y "${_BOOTSTRAP_CACHE}" 2>/dev/null || echo 0)"
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      _local_epoch="$(stat -f %m "${_BOOTSTRAP_CACHE}" 2>/dev/null || echo 0)"
+    else
+      _local_epoch="$(stat -c %Y "${_BOOTSTRAP_CACHE}" 2>/dev/null || echo 0)"
+    fi
 
     if [[ -n "${_remote_date}" ]]; then
-      _remote_epoch="$(date -d "${_remote_date}" +%s 2>/dev/null || echo 0)"
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        _remote_epoch="$(date -j -f "%a, %d %b %Y %T %Z" "${_remote_date}" +%s 2>/dev/null || echo 0)"
+      else
+        _remote_epoch="$(date -d "${_remote_date}" +%s 2>/dev/null || echo 0)"
+      fi
       if [[ "${_local_epoch}" -ge "${_remote_epoch}" ]]; then
         echo -e "  \033[1;32mCached bootstrap is current\033[0m (server: ${_remote_date})"
         _need_download=0
@@ -906,11 +1164,12 @@ download_bootstrap() {
   echo -e "\n\033[1mExtracting bootstrap to '${target_dir}'...\033[0m"
 
   if [[ -d "${target_dir}/lmdb" ]]; then
-    sudo mv "${target_dir}/lmdb" "${target_dir}/lmdb_$(echo $RANDOM | md5sum | head -c 8)"
+    local _suffix; _suffix="$(printf '%08x' $RANDOM)"
+    ${_SUDO} mv "${target_dir}/lmdb" "${target_dir}/lmdb_${_suffix}"
   fi
-  sudo mkdir -p "${target_dir}"
-  sudo tar -xzf "${_BOOTSTRAP_CACHE}" -C "${target_dir}"
-  sudo chown -R "${username}:${username}" "${target_dir}"
+  ${_SUDO} mkdir -p "${target_dir}"
+  ${_SUDO} tar -xzf "${_BOOTSTRAP_CACHE}" -C "${target_dir}"
+  [[ -n "${username}" ]] && ${_SUDO} chown -R "${username}:${username}" "${target_dir}"
 
   echo -e "\033[1;32mBootstrap extracted successfully.\033[0m"
 }

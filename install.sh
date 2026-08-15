@@ -642,9 +642,11 @@ install_manager() {
     tput rev 2>/dev/null || true; echo -e "\n\033[1m  Service Node ${idx} of ${config[nodes]} — ${snode_name}  \033[0m"; tput sgr0 2>/dev/null || true
 
     print_step 2 4 "Creating data directory ${data_dir}"
-    sudo mkdir -p "${data_dir}"
-    sudo chown xeqm:xeqm "${data_dir}"
-    sudo chmod 0700 "${data_dir}"
+    ${_SUDO} mkdir -p "${data_dir}"
+    if [[ "${OS_TYPE}" != "Darwin" ]]; then
+      ${_SUDO} chown xeqm:xeqm "${data_dir}"
+    fi
+    ${_SUDO} chmod 0700 "${data_dir}"
 
     print_step 3 4 "Setting up blockchain data"
     local bc_val="${node_config[copy_blockchain]}"
@@ -659,7 +661,7 @@ install_manager() {
     copy_blockchain_to_data_dir "${data_dir}" "${bc_val}"
     [[ "${idx}" -eq 1 ]] && snode1_data_dir="${data_dir}"
 
-    print_step 4 4 "Writing systemd unit and starting service"
+    print_step 4 4 "Writing service unit and starting service"
     write_canonical_unit \
       "${snode_name}" \
       "${node_config[p2p_bind_port]}" \
@@ -668,8 +670,9 @@ install_manager() {
       "${config[service_node_public_ip]}" \
       "${config[daemon_log_level]:-}"
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable --now "xeqmnode_${snode_name}"
+    svc_reload_daemon
+    svc_enable "${snode_name}"
+    svc_start "${snode_name}"
 
     if [[ "${config[quiet_mode]:-0}" -eq 0 ]]; then
       watch_daemon_status "${node_config[rpc_bind_port]}" "xeqmnode_${snode_name}"
@@ -850,17 +853,22 @@ watch_daemon_status() {
   local info="" height="" target_height=""
   local _synced_checks=0  # consecutive checks where target_height=0 and height stable
 
-  # Capture service activation time once for journal queries
-  local _svc_since
-  _svc_since="$(sudo systemctl show "${svc_name}" -p ActiveEnterTimestamp --value \
-    2>/dev/null | sed 's/ [A-Z]*$//' || true)"
+  # Extract snode name (xeqmnode_snodeN → snodeN)
+  local _snode_name="${svc_name#xeqmnode_}"
+
+  # Capture service activation time once for journal queries (Linux only)
+  local _svc_since=""
+  if [[ "${OS_TYPE}" != "Darwin" ]]; then
+    _svc_since="$(sudo systemctl show "${svc_name}" -p ActiveEnterTimestamp --value \
+      2>/dev/null | sed 's/ [A-Z]*$//' || true)"
+  fi
 
   echo -e "\n\033[1mMonitoring blockchain sync progress:\033[0m"
 
   # Wait up to 90s for the service unit to be active — spinner updates every second
   local deadline=$(( $(date +%s) + 90 ))
   while [[ $(date +%s) -lt ${deadline} ]]; do
-    sudo systemctl is-active --quiet "${svc_name}" 2>/dev/null && break
+    svc_is_active "${_snode_name}" 2>/dev/null && break
     spin_i=$(( spin_i + 1 ))
     printf "\r  %s  Starting daemon...  (%s elapsed)%-20s" \
       "${spin_chars:$(( spin_i % 4 )):1}" "$(_watch_elapsed "${start_time}")" ""
@@ -880,12 +888,16 @@ watch_daemon_status() {
     if [[ ${_rpc_tick} -ge 10 ]]; then
       _rpc_tick=0
 
-      # Search all journal output since service started — avoids missing the sync
-      # message due to log volume pushing it past a fixed -n line limit
-      local _journal_args=(--no-pager)
-      [[ -n "${_svc_since}" ]] && _journal_args+=(--since "${_svc_since}") || _journal_args+=(-n 2000)
-      if sudo journalctl -u "${svc_name}" "${_journal_args[@]}" 2>/dev/null \
-          | grep -q "You are now synchronized with the network"; then
+      # Search all logs since service started for the sync completion marker
+      local _log_output=""
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        _log_output="$(tail -n 2000 "${XEQM_STATE_BASE}/${_snode_name}/xeqm-d.log" 2>/dev/null || true)"
+      else
+        local _journal_args=(--no-pager)
+        [[ -n "${_svc_since}" ]] && _journal_args+=(--since "${_svc_since}") || _journal_args+=(-n 2000)
+        _log_output="$(sudo journalctl -u "${svc_name}" "${_journal_args[@]}" 2>/dev/null || true)"
+      fi
+      if printf '%s' "${_log_output}" | grep -q "You are now synchronized with the network"; then
         printf "\r  \033[1;32m✓ Blockchain synchronized\033[0m  (%s elapsed)%-40s\n" \
           "$(_watch_elapsed "${start_time}")" ""
         break
@@ -940,8 +952,13 @@ watch_daemon_status() {
         # RPC not yet up — check journal for internal blockchain scan progress
         _synced_checks=0
         local _scan_line _sc _st
-        _scan_line="$(sudo journalctl -u "${svc_name}" --no-pager -n 50 2>/dev/null \
-          | grep 'scanning height' | tail -1 || true)"
+        local _scan_src
+        if [[ "${OS_TYPE}" == "Darwin" ]]; then
+          _scan_src="$(tail -n 50 "${XEQM_STATE_BASE}/${_snode_name}/xeqm-d.log" 2>/dev/null || true)"
+        else
+          _scan_src="$(sudo journalctl -u "${svc_name}" --no-pager -n 50 2>/dev/null || true)"
+        fi
+        _scan_line="$(printf '%s' "${_scan_src}" | grep 'scanning height' | tail -1 || true)"
         if [[ -n "${_scan_line}" ]]; then
           _sc="$(printf '%s' "${_scan_line}" | sed 's/.*scanning height \([0-9]*\)\/.*/\1/')"
           _st="$(printf '%s' "${_scan_line}" | sed 's/.*scanning height [0-9]*\/\([0-9]*\).*/\1/')"
@@ -965,6 +982,12 @@ watch_daemon_status() {
 }
 
 install_agent() {
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "\n  Agent installation is not supported on macOS — skipping."
+    echo -e "  To connect this node to the operator dashboard, install the agent on a Linux host."
+    return 0
+  fi
+
   if systemctl is-enabled --quiet xeqm-agent.timer 2>/dev/null; then
     echo -e "\n  XEQM agent already installed and enabled — skipping."
     return 0
@@ -1144,10 +1167,18 @@ next_steps() {
   while [ "${idx}" -le "${install_count}" ]; do
     local _sn="snode$(( first_slot + idx - 1 ))"
     local _rpc="${config["snode${idx}__rpc_bind_port"]}"
-    echo -e "       \033[1msudo -u xeqm /opt/xeqm/bin/xeqm-d print_sn_key --rpc-admin=127.0.0.1:${_rpc}\033[0m"
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      echo -e "       \033[1m${XEQM_BIN_DIR}/xeqm-d print_sn_key --rpc-admin=127.0.0.1:${_rpc}\033[0m"
+    else
+      echo -e "       \033[1msudo -u xeqm /opt/xeqm/bin/xeqm-d print_sn_key --rpc-admin=127.0.0.1:${_rpc}\033[0m"
+    fi
     idx=$((idx + 1))
   done
-  echo -e "\n       Key files: \033[1m/var/lib/xeqm/snodeN/key_bls\033[0m  and  \033[1m/var/lib/xeqm/snodeN/key_ed25519\033[0m\n"
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "\n       Key files: \033[1m${XEQM_STATE_BASE}/snodeN/key_bls\033[0m  and  \033[1m${XEQM_STATE_BASE}/snodeN/key_ed25519\033[0m\n"
+  else
+    echo -e "\n       Key files: \033[1m/var/lib/xeqm/snodeN/key_bls\033[0m  and  \033[1m/var/lib/xeqm/snodeN/key_ed25519\033[0m\n"
+  fi
 
   if [[ "${config[agent_installed]:-0}" -eq 1 ]]; then
     echo -e "\n\033[1m  [4]  Operator Dashboard Agent\033[0m\n"

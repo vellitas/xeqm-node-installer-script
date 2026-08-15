@@ -131,10 +131,20 @@ analyze_and_fix() {
   # ── Discover all xeqmnode_*.service units (running or stopped) ───────────
   # Using --all so stopped/failed nodes appear in the table instead of being invisible.
   local -a all_unit_names=()
-  mapfile -t all_unit_names < <(
-    systemctl list-units 'xeqmnode_*.service' --all --no-pager --no-legend 2>/dev/null \
-    | awk '{print $1}' | natsort
-  )
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    # macOS: discover from plist files in ~/Library/LaunchAgents/
+    local _plist_dir="${XEQM_SVC_DIR}"
+    while IFS= read -r _pf; do
+      local _label; _label="$(basename "${_pf}" .plist)"
+      local _snode="${_label#${XEQM_SVC_LABEL_PREFIX}.}"
+      all_unit_names+=("xeqmnode_${_snode}.service")
+    done < <(find "${_plist_dir}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
+  else
+    mapfile -t all_unit_names < <(
+      systemctl list-units 'xeqmnode_*.service' --all --no-pager --no-legend 2>/dev/null \
+      | awk '{print $1}' | natsort
+    )
+  fi
 
   if [[ "${#all_unit_names[@]}" -eq 0 ]]; then
     echo -e "\n\033[0;33mNo XEQM service node units found on this server.\033[0m"
@@ -152,33 +162,48 @@ analyze_and_fix() {
     [[ -z "${unit_name}" ]] && continue
     local snode_name="${unit_name%.service}"
     snode_name="${snode_name#xeqmnode_}"
-    local unit_file="/etc/systemd/system/${unit_name}"
 
     local username layout data_dir rpc_port p2p_port qnet_port
     rpc_port=""; p2p_port=""; qnet_port=""; data_dir=""
 
-    if grep -q '^User=xeqm$' "${unit_file}" 2>/dev/null; then
-      # ── Canonical layout ──────────────────────────────────────────────────
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      # ── macOS plist layout ────────────────────────────────────────────────
       layout="canonical"
-      username="xeqm"
-      local exec_raw
-      exec_raw=$(systemctl show "${unit_name}" -p ExecStart 2>/dev/null)
-      data_dir=$(echo "${exec_raw}" | grep -o -- '--data-dir=[^ ;]*' | cut -d= -f2 || true)
-      rpc_port=$(echo "${exec_raw}" | grep -o -- '--rpc-admin=[^ ;]*' | grep -o '[0-9]*$' || true)
-      p2p_port=$(echo "${exec_raw}" | grep -o -- '--p2p-bind-port=[^ ;]*' | cut -d= -f2 || true)
-      qnet_port=$(echo "${exec_raw}" | grep -o -- '--quorumnet-port=[^ ;]*' | cut -d= -f2 || true)
+      username="${USER}"
+      local plist_file="${XEQM_SVC_DIR}/${XEQM_SVC_LABEL_PREFIX}.${snode_name}.plist"
+      local plist_args=""
+      plist_args="$(grep -A1 '<string>--' "${plist_file}" 2>/dev/null | grep '<string>' | sed 's|.*<string>||;s|</string>||' | tr '\n' ' ' || true)"
+      data_dir=$(printf '%s' "${plist_args}" | grep -o -- '--data-dir=[^ ]*' | cut -d= -f2 || true)
+      rpc_port=$(printf '%s' "${plist_args}" | grep -o -- '--rpc-admin=[^ ]*' | grep -o '[0-9]*$' || true)
+      p2p_port=$(printf '%s' "${plist_args}" | grep -o -- '--p2p-bind-port=[^ ]*' | cut -d= -f2 || true)
+      qnet_port=$(printf '%s' "${plist_args}" | grep -o -- '--quorumnet-port=[^ ]*' | cut -d= -f2 || true)
       [[ -z "${qnet_port}" && -n "${p2p_port}" ]] && qnet_port=$(( p2p_port + 2 ))
-      [[ -z "${data_dir}" ]] && data_dir="/var/lib/xeqm/${snode_name}"
+      [[ -z "${data_dir}" ]] && data_dir="${XEQM_STATE_BASE}/${snode_name}"
     else
-      # ── Installer layout ──────────────────────────────────────────────────
-      layout="installer"
-      username="${snode_name}"
-      data_dir="/home/${username}/.xeqmlabs"
-      local inst_conf="/home/${username}/xeqm-installer/install.conf"
-      p2p_port=$(grep '^p2p_bind_port='  "${inst_conf}" 2>/dev/null | cut -d= -f2 || true)
-      qnet_port=$(grep '^quorumnet_port=' "${inst_conf}" 2>/dev/null | cut -d= -f2 || true)
-      rpc_port=$(grep  '^rpc_bind_port='  "${inst_conf}" 2>/dev/null | cut -d= -f2 || true)
-      [[ -z "${qnet_port}" && -n "${p2p_port}" ]] && qnet_port=$(( p2p_port + 2 ))
+      local unit_file="/etc/systemd/system/${unit_name}"
+      if grep -q '^User=xeqm$' "${unit_file}" 2>/dev/null; then
+        # ── Canonical layout ────────────────────────────────────────────────
+        layout="canonical"
+        username="xeqm"
+        local exec_raw
+        exec_raw=$(systemctl show "${unit_name}" -p ExecStart 2>/dev/null)
+        data_dir=$(echo "${exec_raw}" | grep -o -- '--data-dir=[^ ;]*' | cut -d= -f2 || true)
+        rpc_port=$(echo "${exec_raw}" | grep -o -- '--rpc-admin=[^ ;]*' | grep -o '[0-9]*$' || true)
+        p2p_port=$(echo "${exec_raw}" | grep -o -- '--p2p-bind-port=[^ ;]*' | cut -d= -f2 || true)
+        qnet_port=$(echo "${exec_raw}" | grep -o -- '--quorumnet-port=[^ ;]*' | cut -d= -f2 || true)
+        [[ -z "${qnet_port}" && -n "${p2p_port}" ]] && qnet_port=$(( p2p_port + 2 ))
+        [[ -z "${data_dir}" ]] && data_dir="/var/lib/xeqm/${snode_name}"
+      else
+        # ── Installer layout ────────────────────────────────────────────────
+        layout="installer"
+        username="${snode_name}"
+        data_dir="/home/${username}/.xeqmlabs"
+        local inst_conf="/home/${username}/xeqm-installer/install.conf"
+        p2p_port=$(grep '^p2p_bind_port='  "${inst_conf}" 2>/dev/null | cut -d= -f2 || true)
+        qnet_port=$(grep '^quorumnet_port=' "${inst_conf}" 2>/dev/null | cut -d= -f2 || true)
+        rpc_port=$(grep  '^rpc_bind_port='  "${inst_conf}" 2>/dev/null | cut -d= -f2 || true)
+        [[ -z "${qnet_port}" && -n "${p2p_port}" ]] && qnet_port=$(( p2p_port + 2 ))
+      fi
     fi
 
     node_names+=( "${snode_name}" )
@@ -259,16 +284,20 @@ analyze_and_fix() {
 
     # ─ Service ─
     local svc_state="fail"
-    sudo systemctl is-active --quiet "${_nsvc}" 2>/dev/null && svc_state="ok"
+    svc_is_active "${_nname}" 2>/dev/null && svc_state="ok"
 
     # ─ Uptime + RAM (via MainPID) ─
     local _mainpid=0 uptime_str="—" ram_mb=0
-    _mainpid=$(systemctl show "${_nsvc}" -p MainPID --value 2>/dev/null | tr -d ' ' || echo 0)
-    if [[ "${_mainpid:-0}" -gt 0 && -d "/proc/${_mainpid}" ]]; then
+    _mainpid="$(svc_mainpid "${_nname}" 2>/dev/null | tr -d ' ' || echo 0)"
+    if [[ "${_mainpid:-0}" -gt 0 ]]; then
       local _etime=""
       _etime=$(ps -o etime= -p "${_mainpid}" 2>/dev/null | tr -d ' ' || true)
       [[ -n "${_etime}" ]] && uptime_str="$(_parse_etime "${_etime}")"
-      ram_mb=$(awk '/VmRSS/{print int($2/1024)}' "/proc/${_mainpid}/status" 2>/dev/null || echo 0)
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        ram_mb=$(ps -o rss= -p "${_mainpid}" 2>/dev/null | awk '{print int($1/1024)}' || echo 0)
+      else
+        ram_mb=$(awk '/VmRSS/{print int($2/1024)}' "/proc/${_mainpid}/status" 2>/dev/null || echo 0)
+      fi
     fi
 
     # ─ Firewall ─
@@ -310,15 +339,24 @@ analyze_and_fix() {
           # Port not open yet — check if daemon is in its initial blockchain scan
           local _scanning=0
           if [[ "${svc_state}" = "ok" && "${_mainpid:-0}" -gt 0 ]]; then
-            journalctl -u "${_nsvc}" --since "3 minutes ago" --no-pager -q 2>/dev/null \
-              | grep -q "scanning height" && _scanning=1 || true
+            if [[ "${OS_TYPE}" == "Darwin" ]]; then
+              tail -n 100 "${XEQM_STATE_BASE}/${_nname}/xeqm-d.log" 2>/dev/null \
+                | grep -q "scanning height" && _scanning=1 || true
+            else
+              journalctl -u "${_nsvc}" --since "3 minutes ago" --no-pager -q 2>/dev/null \
+                | grep -q "scanning height" && _scanning=1 || true
+            fi
           fi
           if [[ "${_scanning}" -eq 1 ]]; then
             fw_state="starting"
           else
             fw_state="fail"
             fw_issue_text+="p2p ${_np2p}/tcp not listening — check daemon config\n"
-            fw_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n"
+            if [[ "${OS_TYPE}" == "Darwin" ]]; then
+              fw_issue_text+="→ tail -n 30 ${XEQM_STATE_BASE}/${_nname}/xeqm-d.log\n"
+            else
+              fw_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n"
+            fi
           fi
         else
           fw_state="ext"
@@ -439,9 +477,19 @@ analyze_and_fix() {
 
     # ─ Build issue text ─
     local node_issue_text=""
+    local _log_hint=""
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      _log_hint="→ tail -n 50 ${XEQM_STATE_BASE}/${_nname}/xeqm-d.log"
+    else
+      _log_hint="→ sudo journalctl -u ${_nsvc} -n 30"
+    fi
     if [[ "${svc_state}" = "fail" ]]; then
       node_issue_text+="Service not running\n"
-      node_issue_text+="→ sudo systemctl start ${_nsvc}\n\n"
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        node_issue_text+="→ launchctl start $(svc_label "${_nname}")\n\n"
+      else
+        node_issue_text+="→ sudo systemctl start ${_nsvc}\n\n"
+      fi
     fi
     if [[ -n "${fw_issue_text}" ]]; then
       node_issue_text+="${fw_issue_text}\n"
@@ -455,22 +503,30 @@ analyze_and_fix() {
       if [[ "${_nlayout}" = "installer" ]]; then
         node_issue_text+="→ sudo -H -u ${_nuser} bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh prepare_sn'\n\n"
       else
-        node_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n\n"
+        node_issue_text+="${_log_hint}\n\n"
       fi
     fi
     local _total_peers=$(( peers_in + peers_out ))
     if [[ "${svc_state}" = "ok" && "${_total_peers}" -eq 0 && "${fw_state}" != "starting" ]]; then
       node_issue_text+="No peers — daemon is isolated from the network\n"
-      node_issue_text+="→ sudo journalctl -u ${_nsvc} -n 30\n\n"
+      node_issue_text+="${_log_hint}\n\n"
     elif [[ "${svc_state}" = "ok" && "${_total_peers}" -lt 3 && "${fw_state}" != "starting" ]]; then
       node_issue_text+="# Low peer count (${_total_peers}) — monitor for network isolation\n\n"
     fi
     if [[ "${chain_state}" = "stuck" ]]; then
       node_issue_text+="Blockchain stuck at ${blocks_done} (network tip: ${current_block}) — see auto-fix below\n"
-      node_issue_text+="→ sudo systemctl stop ${_nsvc} && sleep 2 && sudo systemctl start ${_nsvc}\n\n"
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        node_issue_text+="→ launchctl stop $(svc_label "${_nname}") && sleep 2 && launchctl start $(svc_label "${_nname}")\n\n"
+      else
+        node_issue_text+="→ sudo systemctl stop ${_nsvc} && sleep 2 && sudo systemctl start ${_nsvc}\n\n"
+      fi
     elif [[ "${chain_state}" = "nodata" ]]; then
       node_issue_text+="No blockchain data — daemon not responding\n"
-      node_issue_text+="→ sudo journalctl -u ${_nsvc} -n 50\n\n"
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        node_issue_text+="→ tail -n 50 ${XEQM_STATE_BASE}/${_nname}/xeqm-d.log\n\n"
+      else
+        node_issue_text+="→ sudo journalctl -u ${_nsvc} -n 50\n\n"
+      fi
     fi
 
     d_name+=( "${_nname}" )
@@ -695,9 +751,9 @@ analyze_and_fix() {
       echo ""
       for _si in "${stuck_blockchains[@]}"; do
         printf "  Restarting %s...\n" "${node_names[$_si]}"
-        sudo systemctl stop  "${node_svcs[$_si]}" 2>/dev/null || true
+        svc_stop "${node_names[$_si]}" 2>/dev/null || true
         sleep 2
-        sudo systemctl start "${node_svcs[$_si]}"
+        svc_start "${node_names[$_si]}"
         echo -e "  \033[0;32mRestarted\033[0m — re-run doctor in a few minutes to confirm"
       done
     fi
@@ -737,16 +793,16 @@ analyze_and_fix() {
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop'
         else
-          sudo systemctl stop "${bad_svc}"
+          svc_stop "${bad_name}" 2>/dev/null || true
         fi
         echo -e "  Copying lmdb from donor '${donor_name}'... (may take a few minutes)"
-        sudo rm -Rf "${bad_data}/lmdb"
-        sudo cp -R "${donor_data}/lmdb" "${bad_data}"
-        sudo chown -R "${bad_user}:${bad_user}" "${bad_data}"
+        ${_SUDO} rm -Rf "${bad_data}/lmdb"
+        ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+        [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R "${bad_user}:${bad_user}" "${bad_data}"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
         else
-          sudo systemctl start "${bad_svc}"
+          svc_start "${bad_name}"
         fi
         echo -e "  \033[0;32mDone.\033[0m"
       done
@@ -779,13 +835,13 @@ analyze_and_fix() {
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop' 2>/dev/null || true
         else
-          sudo systemctl stop "${bad_svc}" 2>/dev/null || true
+          svc_stop "${bad_name}" 2>/dev/null || true
         fi
         download_bootstrap "${bad_data}" "${bad_user}"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
         else
-          sudo systemctl start "${bad_svc}"
+          svc_start "${bad_name}"
         fi
         echo -e "  \033[0;32mDone.\033[0m"
       done
