@@ -56,28 +56,27 @@ wipe_node() {
 
 wipe_canonical_node() {
   local snode_name="$1"
-  local service="xeqmnode_${snode_name}.service"
-  local service_file="/etc/systemd/system/${service}"
-  local data_dir="/var/lib/xeqm/${snode_name}"
+  local data_dir="${XEQM_STATE_BASE}/${snode_name}"
 
   echo -e "\n  \033[1;33mWiping canonical node: ${snode_name}\033[0m"
 
-  if systemctl is-active --quiet "${service}" 2>/dev/null; then
-    echo "    stopping ${service}..."
-    sudo systemctl stop "${service}"
-  fi
-  if systemctl is-enabled --quiet "${service}" 2>/dev/null; then
-    sudo systemctl disable "${service}" 2>/dev/null || true
-  fi
+  svc_stop "${snode_name}" 2>/dev/null || true
+  svc_disable "${snode_name}" 2>/dev/null || true
 
-  if [[ -f "${service_file}" ]]; then
-    echo "    removing ${service_file}"
-    sudo rm -f "${service_file}"
+  local svc_file
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    svc_file="$(svc_plist_path "${snode_name}")"
+  else
+    svc_file="${XEQM_SVC_DIR}/xeqmnode_${snode_name}.service"
+  fi
+  if [[ -f "${svc_file}" ]]; then
+    echo "    removing ${svc_file}"
+    ${_SUDO} rm -f "${svc_file}"
   fi
 
   if [[ -d "${data_dir}" ]]; then
     echo "    removing ${data_dir}"
-    sudo rm -rf "${data_dir}"
+    ${_SUDO} rm -rf "${data_dir}"
   fi
 
   echo -e "  \033[1;32m[done]\033[0m ${snode_name}"
@@ -96,14 +95,23 @@ discover_canonical_snodes() {
   local -n _dcs_result="$1"
   _dcs_result=()
   local f
-  while IFS= read -r f; do
-    if grep -q '^User=xeqm$' "${f}" 2>/dev/null; then
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    while IFS= read -r f; do
       local sname
-      sname="$(basename "${f}" .service)"
-      sname="${sname#xeqmnode_}"
+      sname="$(basename "${f}" .plist)"
+      sname="${sname##*.}"   # com.xeqmlabs.snode1 → snode1
       _dcs_result+=("${sname}")
-    fi
-  done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' 2>/dev/null | sort)
+    done < <(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
+  else
+    while IFS= read -r f; do
+      if grep -q '^User=xeqm$' "${f}" 2>/dev/null; then
+        local sname
+        sname="$(basename "${f}" .service)"
+        sname="${sname#xeqmnode_}"
+        _dcs_result+=("${sname}")
+      fi
+    done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' 2>/dev/null | sort)
+  fi
 }
 
 wipe_usage() {

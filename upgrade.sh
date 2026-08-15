@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-upgrade_session_token="$(echo $RANDOM | md5sum | head -c 8)"
+upgrade_session_token="$(printf '%08x' $RANDOM)"
 readonly upgrade_session_token
 
 : "${script_basedir:=$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")}"
@@ -96,15 +96,22 @@ validate_parsed_command_line_args() {
 
 detect_layout() {
   local has_canonical=0 has_installer=0
-  while IFS= read -r unit_file; do
-    if grep -q '^User=xeqm$' "${unit_file}" 2>/dev/null; then
-      has_canonical=1
-    else
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    # macOS: canonical nodes live as LaunchAgent plists
+    local _plist_count
+    _plist_count="$(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "${_plist_count}" -gt 0 ]] && has_canonical=1
+  else
+    while IFS= read -r unit_file; do
+      if grep -q '^User=xeqm$' "${unit_file}" 2>/dev/null; then
+        has_canonical=1
+      else
+        has_installer=1
+      fi
+    done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' 2>/dev/null)
+    if getent passwd | awk -F: '$6 ~ /^\/home\/snode/' | grep -q .; then
       has_installer=1
     fi
-  done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' 2>/dev/null)
-  if getent passwd | awk -F: '$6 ~ /^\/home\/snode/' | grep -q .; then
-    has_installer=1
   fi
   if [[ "${has_canonical}" -eq 1 && "${has_installer}" -eq 1 ]]; then
     echo "mixed"
@@ -124,20 +131,24 @@ user_option_handler() {
 
     if [[ "${layout}" = "canonical" || "${layout}" = "mixed" ]]; then
       user_option_value="__canonical__"
-      local -a _installer_users=()
-      while IFS= read -r _u; do
-        [[ -n "${_u}" ]] && _installer_users+=("${_u}")
-      done < <(getent passwd | awk -F: '$6 ~ /^\/home\/snode/ { print $1 }' | sort)
-      if [[ "${#_installer_users[@]}" -gt 0 ]]; then
-        user_option_value="__canonical__,$(IFS=,; echo "${_installer_users[*]}")"
+      if [[ "${OS_TYPE}" != "Darwin" ]]; then
+        local -a _installer_users=()
+        while IFS= read -r _u; do
+          [[ -n "${_u}" ]] && _installer_users+=("${_u}")
+        done < <(getent passwd | awk -F: '$6 ~ /^\/home\/snode/ { print $1 }' | sort)
+        if [[ "${#_installer_users[@]}" -gt 0 ]]; then
+          user_option_value="__canonical__,$(IFS=,; echo "${_installer_users[*]}")"
+        fi
       fi
       return 0
     fi
 
     local -a _auto_users=()
+    if [[ "${OS_TYPE}" != "Darwin" ]]; then
     while IFS= read -r _u; do
       [[ -n "${_u}" ]] && _auto_users+=("${_u}")
     done < <(getent passwd | awk -F: '$6 ~ /^\/home\/snode/ { print $1 }' | sort)
+    fi
     if [[ "${#_auto_users[@]}" -eq 0 ]]; then
       echo -e "\n\033[0;33merror: No snode* users or canonical units found. Use --user to specify usernames explicitly.\033[0m\n"
       upgrade_usage
@@ -180,18 +191,24 @@ upgrade_manager() {
 
 upgrade_canonical_nodes() {
   local -a canonical_units=()
-  while IFS= read -r u; do
-    [[ -n "${u}" ]] && canonical_units+=("${u}")
-  done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' \
-    -exec grep -l '^User=xeqm$' {} \; 2>/dev/null | sort)
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    while IFS= read -r u; do
+      [[ -n "${u}" ]] && canonical_units+=("${u}")
+    done < <(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
+  else
+    while IFS= read -r u; do
+      [[ -n "${u}" ]] && canonical_units+=("${u}")
+    done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' \
+      -exec grep -l '^User=xeqm$' {} \; 2>/dev/null | sort)
+  fi
 
   if [[ "${#canonical_units[@]}" -eq 0 ]]; then
     return 0
   fi
 
   local installed_ver=""
-  if [[ -x "/opt/xeqm/bin/xeqm-d" ]]; then
-    installed_ver="$(/opt/xeqm/bin/xeqm-d --version 2>/dev/null \
+  if [[ -x "${XEQM_BIN_DIR}/xeqm-d" ]]; then
+    installed_ver="$("${XEQM_BIN_DIR}/xeqm-d" --version 2>/dev/null \
       | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   fi
 
@@ -226,34 +243,39 @@ upgrade_canonical_nodes() {
   [[ -n "${new_version}" ]] && echo -e "  Downloaded: ${new_version}"
 
   local version="${config[install_version]}"
-  local versioned_bin="/opt/xeqm/bin/xeqm-d-${version}"
-  sudo mkdir -p /opt/xeqm/bin
-  sudo cp "${bin_dir}/xeqm-d" "${versioned_bin}"
-  sudo chmod 755 "${versioned_bin}"
-  sudo ln -sf "${versioned_bin}" /opt/xeqm/bin/xeqm-d
-  echo -e "  \033[1;32mBinary updated:\033[0m /opt/xeqm/bin/xeqm-d -> ${versioned_bin}"
+  local versioned_bin="${XEQM_BIN_DIR}/xeqm-d-${version}"
+  ${_SUDO} mkdir -p "${XEQM_BIN_DIR}"
+  ${_SUDO} cp "${bin_dir}/xeqm-d" "${versioned_bin}"
+  ${_SUDO} chmod 755 "${versioned_bin}"
+  ${_SUDO} ln -sf "${versioned_bin}" "${XEQM_BIN_DIR}/xeqm-d"
+  echo -e "  \033[1;32mBinary updated:\033[0m ${XEQM_BIN_DIR}/xeqm-d -> ${versioned_bin}"
   local _bin _bname
   for _bin in "${bin_dir}"/*; do
     [[ -f "${_bin}" && -x "${_bin}" ]] || continue
     _bname="$(basename "${_bin}")"
     [[ "${_bname}" = "xeqm-d" ]] && continue
-    sudo cp "${_bin}" "/opt/xeqm/bin/${_bname}"
-    sudo chmod 755 "/opt/xeqm/bin/${_bname}"
-    echo -e "  \033[1;32mInstalled:\033[0m /opt/xeqm/bin/${_bname}"
+    ${_SUDO} cp "${_bin}" "${XEQM_BIN_DIR}/${_bname}"
+    ${_SUDO} chmod 755 "${XEQM_BIN_DIR}/${_bname}"
+    echo -e "  \033[1;32mInstalled:\033[0m ${XEQM_BIN_DIR}/${_bname}"
   done
 
   echo -e "\n\033[1mRestarting canonical service nodes...\033[0m"
   for unit_file in "${canonical_units[@]}"; do
-    local unit_name
+    local unit_name snode_name
     unit_name="$(basename "${unit_file}")"
-    tput rev 2>/dev/null || true; echo -e "\n\033[1m ${unit_name} \033[0m"; tput sgr0 2>/dev/null || true
-    sudo systemctl stop "${unit_name}" || true
+    # Extract snode name: strip prefix (xeqmnode_ or com.xeqmlabs.) and suffix (.service/.plist)
+    snode_name="${unit_name##*.}"        # com.xeqmlabs.snode1.plist → plist (wrong), handle both
+    snode_name="${unit_name%.*}"         # strip extension
+    snode_name="${snode_name##*.}"       # com.xeqmlabs.snode1 → snode1
+    snode_name="${snode_name#xeqmnode_}" # xeqmnode_snode1 → snode1
+    tput rev 2>/dev/null || true; echo -e "\n\033[1m ${snode_name} \033[0m"; tput sgr0 2>/dev/null || true
+    svc_stop "${snode_name}" || true
     sleep 2
-    sudo systemctl start "${unit_name}"
-    echo -e "  \033[1;32mRestarted\033[0m ${unit_name}"
+    svc_start "${snode_name}"
+    echo -e "  \033[1;32mRestarted\033[0m ${snode_name}"
   done
 
-  sudo systemctl daemon-reload
+  svc_reload_daemon
 }
 
 upgrade_installer_nodes() {

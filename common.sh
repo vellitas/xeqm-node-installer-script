@@ -268,7 +268,7 @@ copy_binaries_to_directory(){
 
   if [[ -d "${target_dir}" ]]; then
     # move existing bin directory just to be safe
-    sudo mv "${target_dir}" "${target_dir}_$(echo $RANDOM | md5sum | head -c 8)"
+    ${_SUDO} mv "${target_dir}" "${target_dir}_$(printf '%08x' $RANDOM)"
   fi
   echo -e "\n\033[1mCopying binaries from '${source_dir}' to '${target_dir}'.\033[0m"
   sudo cp -R "${source_dir}" "${target_dir}"
@@ -435,6 +435,7 @@ prompt_service_node_public_ip() {
 }
 
 create_user_if_needed() {
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0   # macOS: nodes run as current user, no system user needed
   local user="$1"
   if ! id -u "${user}" >/dev/null 2>&1; then
     sudo adduser --disabled-password --gecos "${user}" "${user}"

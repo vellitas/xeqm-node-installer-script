@@ -332,7 +332,11 @@ analyze_and_fix() {
         [[ "${fw_pass}" -eq 1 && "${oci_reject}" -eq 0 ]] && fw_state="ok" || fw_state="fail"
       else
         local p2p_listen=0
-        ss -tlnp 2>/dev/null | grep -qE ":${_np2p}\b" && p2p_listen=1
+        if [[ "${OS_TYPE}" == "Darwin" ]]; then
+          lsof -nP -iTCP:"${_np2p}" 2>/dev/null | grep -q LISTEN && p2p_listen=1 || true
+        else
+          ss -tlnp 2>/dev/null | grep -qE ":${_np2p}\b" && p2p_listen=1 || true
+        fi
         if [[ "${oci_reject}" -eq 1 ]]; then
           fw_state="fail"
         elif [[ "${p2p_listen}" -eq 0 ]]; then
@@ -374,7 +378,7 @@ analyze_and_fix() {
     local lmdb_db_path="${_ndata}/lmdb/data.mdb"
     local lmdb_gb=0
     [[ -f "${lmdb_db_path}" ]] && \
-      lmdb_gb=$(( $(stat -c%s "${lmdb_db_path}" 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))
+      lmdb_gb=$(( $(_stat_size "${lmdb_db_path}") / 1024 / 1024 / 1024 ))
     local disk_node_ok=1
     [[ "${user_disk_gb}" -lt 20 ]] && disk_node_ok=0
     [[ "${lmdb_gb}" -gt 0 && "${user_disk_gb}" -lt "${lmdb_gb}" ]] && disk_node_ok=0
@@ -423,7 +427,7 @@ analyze_and_fix() {
       if [[ -f "${lmdb_path}" ]]; then
         chain_state="syncing"
         local lmdb_mb
-        lmdb_mb=$(( $(stat -c%s "${lmdb_path}" 2>/dev/null || echo 0) / 1024 / 1024 ))
+        lmdb_mb=$(( $(_stat_size "${lmdb_path}") / 1024 / 1024 ))
         chain_col="SYNC (${lmdb_mb}MB)"
       else
         chain_state="nodata"

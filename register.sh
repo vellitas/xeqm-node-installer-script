@@ -146,17 +146,30 @@ register_run() {
   # snode_name → rpc_port (works for both canonical and installer layout)
   declare -A snode_rpc_map=()
 
-  while read -r unit_name; do
-    [[ -z "${unit_name}" ]] && continue
-    local snode_name="${unit_name%.service}"
-    snode_name="${snode_name#xeqmnode_}"
-    local exec_raw rpc_port
-    exec_raw="$(systemctl show "${unit_name}" -p ExecStart 2>/dev/null)"
-    rpc_port="$(echo "${exec_raw}" | grep -o -- '--rpc-admin=[^ ;]*' | grep -o '[0-9]*$' || true)"
-    [[ -z "${rpc_port}" ]] && continue
-    snode_rpc_map["${snode_name}"]="${rpc_port}"
-  done < <(systemctl list-units 'xeqmnode_*.service' --no-pager --no-legend 2>/dev/null \
-    | awk '{print $1}' | natsort)
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    # macOS: discover nodes from LaunchAgent plists
+    while IFS= read -r plist; do
+      [[ -z "${plist}" ]] && continue
+      local plist_base snode_name rpc_port
+      plist_base="$(basename "${plist}" .plist)"
+      snode_name="${plist_base##*.}"   # com.xeqmlabs.snode1 → snode1
+      rpc_port="$(grep -o -- '--rpc-admin=[^ <]*' "${plist}" | grep -o '[0-9]*$' || true)"
+      [[ -z "${rpc_port}" ]] && continue
+      snode_rpc_map["${snode_name}"]="${rpc_port}"
+    done < <(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
+  else
+    while read -r unit_name; do
+      [[ -z "${unit_name}" ]] && continue
+      local snode_name="${unit_name%.service}"
+      snode_name="${snode_name#xeqmnode_}"
+      local exec_raw rpc_port
+      exec_raw="$(systemctl show "${unit_name}" -p ExecStart 2>/dev/null)"
+      rpc_port="$(echo "${exec_raw}" | grep -o -- '--rpc-admin=[^ ;]*' | grep -o '[0-9]*$' || true)"
+      [[ -z "${rpc_port}" ]] && continue
+      snode_rpc_map["${snode_name}"]="${rpc_port}"
+    done < <(systemctl list-units 'xeqmnode_*.service' --no-pager --no-legend 2>/dev/null \
+      | awk '{print $1}' | natsort)
+  fi
 
   if [[ "${#snode_rpc_map[@]}" -eq 0 ]]; then
     echo -e "\n\033[0;33mNo active XEQM service node units found on this server.\033[0m\n"

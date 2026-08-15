@@ -45,23 +45,29 @@ decommission_run() {
   install_dependencies
   [[ "${XEQM_FROM_MENU:-0}" != "1" ]] && print_splash_screen "Service Node Decommission" "${decommission_version}"
 
-  # ── Discover nodes via systemctl ───────────────────────────────────────────
-  local -a all_units=()
-  mapfile -t all_units < <(systemctl list-units 'xeqmnode_*.service' \
-    --no-pager --no-legend 2>/dev/null | awk '{print $1}' | natsort)
-
-  # Build snode_name → rpc_port map
+  # ── Discover nodes ─────────────────────────────────────────────────────────
   declare -A snode_rpc_map=()
-  for _unit in "${all_units[@]}"; do
-    local _sname="${_unit%.service}"
-    _sname="${_sname#xeqmnode_}"
-    local _exec_raw _rpc_port
-    _exec_raw="$(systemctl show "${_unit}" -p ExecStart 2>/dev/null || true)"
-    _rpc_port="$(printf '%s' "${_exec_raw}" | grep -o -- '--rpc-admin=[^ ;]*' | grep -o '[0-9]*$' || true)"
-    if [[ -n "${_rpc_port}" ]]; then
-      snode_rpc_map["${_sname}"]="${_rpc_port}"
-    fi
-  done
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    while IFS= read -r plist; do
+      local _pbase _sname _rpc_port
+      _pbase="$(basename "${plist}" .plist)"
+      _sname="${_pbase##*.}"   # com.xeqmlabs.snode1 → snode1
+      _rpc_port="$(grep -o -- '--rpc-admin=[^ <]*' "${plist}" | grep -o '[0-9]*$' || true)"
+      [[ -n "${_rpc_port}" ]] && snode_rpc_map["${_sname}"]="${_rpc_port}"
+    done < <(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
+  else
+    local -a all_units=()
+    mapfile -t all_units < <(systemctl list-units 'xeqmnode_*.service' \
+      --no-pager --no-legend 2>/dev/null | awk '{print $1}' | natsort)
+    for _unit in "${all_units[@]}"; do
+      local _sname="${_unit%.service}"
+      _sname="${_sname#xeqmnode_}"
+      local _exec_raw _rpc_port
+      _exec_raw="$(systemctl show "${_unit}" -p ExecStart 2>/dev/null || true)"
+      _rpc_port="$(printf '%s' "${_exec_raw}" | grep -o -- '--rpc-admin=[^ ;]*' | grep -o '[0-9]*$' || true)"
+      [[ -n "${_rpc_port}" ]] && snode_rpc_map["${_sname}"]="${_rpc_port}"
+    done
+  fi
 
   local -a all_snodes=()
   mapfile -t all_snodes < <(printf '%s\n' "${!snode_rpc_map[@]}" | natsort)
