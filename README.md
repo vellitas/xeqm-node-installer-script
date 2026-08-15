@@ -1,20 +1,29 @@
 # XEQM Labs — Service Node Installer
 
-Easy setup and management of XEQM service nodes on a single Linux server.
+Easy setup and management of XEQM service nodes on Linux or macOS.
 
-> Based on the original work by [misterr-labs](https://github.com/misterr-labs/eqsnode-installer-script) — extended with XEQM Labs rebranding, canonical systemd layout, and additional tooling.
+> Based on the original work by [misterr-labs](https://github.com/misterr-labs/eqsnode-installer-script) — extended with XEQM Labs rebranding, canonical systemd/launchd layout, and additional tooling.
 
 ---
 
 ## Requirements
 
+### Linux
 - Ubuntu 22.04 or 24.04 LTS (64-bit, x86_64 or ARM64)
 - Root or `sudo` access
 - ~2 GB disk space and ~800 MB RAM per node
 
+### macOS
+- Apple Silicon (ARM64) — macOS 12 Ventura or later
+- [Homebrew](https://brew.sh) installed
+- ~2 GB disk space and ~800 MB RAM per node
+- No `sudo` required — nodes run as your user account
+
 ---
 
 ## Step 1 — Get the scripts
+
+### Linux
 
 ```bash
 sudo apt -y install git
@@ -28,12 +37,35 @@ cd /opt/xeqm-node-installer-script
 cd /opt/xeqm-node-installer-script && sudo git pull
 ```
 
+### macOS
+
+```bash
+git clone https://github.com/vellitas/xeqm-node-installer-script
+cd xeqm-node-installer-script
+```
+
+> If `git` is not found, run `xcode-select --install` to get the Xcode Command Line Tools.
+
+**Already have the scripts? Pull the latest:**
+
+```bash
+cd xeqm-node-installer-script && git pull
+```
+
 ---
 
 ## Step 2 — Launch the menu
 
+### Linux
+
 ```bash
 sudo bash xeqm-manager.sh
+```
+
+### macOS
+
+```bash
+bash xeqm-manager.sh
 ```
 
 This opens a full-screen interactive menu with every tool:
@@ -58,7 +90,7 @@ This opens a full-screen interactive menu with every tool:
 
 ## Step 3 — Install service nodes
 
-Select **Install** from the menu. The installer automatically installs its dependencies and then walks you through every decision one step at a time:
+Select **Install** from the menu. The installer automatically installs its dependencies, then walks you through every decision one step at a time:
 
 | Step | What it asks |
 |---|---|
@@ -71,7 +103,9 @@ Select **Install** from the menu. The installer automatically installs its depen
 | 7 | Final confirmation — press **Install** to begin |
 | 8 | **Operator Dashboard Agent** (optional) — connects this server to an XEQM operator dashboard for remote monitoring. Skip if you are not using a dashboard. |
 
-### Firewall mode
+On **macOS**, binary download defaults to the official notarized ARM64 release and the firewall step defaults to **External** — open the required ports in your router or OPNSense/pfSense.
+
+### Firewall mode (Linux)
 
 | Option | When to use |
 |---|---|
@@ -80,7 +114,7 @@ Select **Install** from the menu. The installer automatically installs its depen
 | Oracle Cloud (OCI) | OCI ships a raw iptables REJECT rule that silently blocks UFW-opened ports — this option removes it automatically |
 | External firewall | OPNsense, pfSense, or any perimeter firewall — installer prints the exact ports to open |
 
-After confirmation, the installer shows step-by-step progress as it creates the node state directories, downloads the binary and blockchain, installs systemd services, and starts the daemons. A single node takes about 15–20 minutes (mostly blockchain download time).
+After confirmation, the installer shows step-by-step progress as it creates the node state directories, downloads and verifies the binary, downloads the blockchain, installs services, and starts the daemons. A single node takes about 15–20 minutes (mostly blockchain download time).
 
 ---
 
@@ -106,46 +140,29 @@ The script prints a registration command for each node. Submit it from your XEQM
 
 Each node has a unique private key stored in its state directory. **Losing this key means losing the node.** Back it up immediately after install.
 
-List all node keys:
+### Linux
 
 ```bash
-sudo find /var/lib/xeqm -name 'key_ed25519' 2>/dev/null
+sudo find /var/lib/xeqm -name 'key_ed25519'
+sudo cat /var/lib/xeqm/snode1/key_ed25519
 ```
 
-Copy a key off the server:
+### macOS
 
 ```bash
-sudo cat /var/lib/xeqm/snode1/key_ed25519
+find ~/xeqm -name 'key_ed25519'
+cat ~/xeqm/snode1/key_ed25519
 ```
 
 Store the output securely (password manager, encrypted backup). To move a node to a new server without losing its identity, use `server-migrate.sh` — see [Migrate a node](#migrate-a-node-from-another-server-server-migratesh) below.
 
 ---
 
-## Operator Dashboard (optional)
-
-The [XEQM Operator Dashboard](https://github.com/vellitas/xeqm-operator-dashboard) lets you monitor and manage your nodes from a web browser. Step 8 of the installer sets up the agent that connects your server to a dashboard.
-
-**What you need first:**
-- A running operator dashboard (self-hosted or provided by a community member)
-- A dashboard URL (e.g. `https://dashboard.example.com`)
-- An agent token from the dashboard's **Settings → Agents** page
-
-**If you skipped Step 8 during install**, you can add the agent manually:
-
-```bash
-sudo bash install.sh   # re-run; the agent step appears at the end
-```
-
-Or install just the agent by answering the agent prompts when they appear. The installer fetches the agent directly from your dashboard, so it is always the correct version for that dashboard.
-
-**Verifying the connection:** After install, the agent runs every 60 seconds. Within a minute your server should appear as **online** in the dashboard's Remote Agents list.
-
----
-
 ## Day-to-day node management
 
-Nodes run as systemd services under the shared `xeqm` user. Standard systemd commands work directly:
+### Linux
+
+Nodes run as systemd services under the shared `xeqm` user:
 
 ```bash
 # Status
@@ -155,9 +172,9 @@ sudo systemctl status xeqmnode_snode1
 sudo journalctl -u xeqmnode_snode1 -f
 
 # Start / stop / restart
-sudo systemctl start   xeqmnode_snode1
-sudo systemctl stop    xeqmnode_snode1
-sudo systemctl stop    xeqmnode_snode1 && sleep 3 && sudo systemctl start xeqmnode_snode1
+sudo systemctl start  xeqmnode_snode1
+sudo systemctl stop   xeqmnode_snode1
+sudo systemctl stop   xeqmnode_snode1 && sleep 3 && sudo systemctl start xeqmnode_snode1
 ```
 
 To act on all nodes at once:
@@ -168,26 +185,74 @@ sudo systemctl start  'xeqmnode_snode*'
 sudo systemctl status 'xeqmnode_snode*'
 ```
 
+### macOS
+
+Nodes run as launchd agents under your user account:
+
+```bash
+# Status (all nodes)
+launchctl list | grep xeqmlabs
+
+# Logs (live)
+tail -f ~/xeqm/snode1/xeqm-d.log
+
+# Start / stop / restart
+launchctl start  com.xeqmlabs.snode1
+launchctl stop   com.xeqmlabs.snode1
+launchctl stop   com.xeqmlabs.snode1 && sleep 3 && launchctl start com.xeqmlabs.snode1
+```
+
+---
+
+## Operator Dashboard (optional)
+
+The [XEQM Operator Dashboard](https://github.com/vellitas/xeqm-operator-dashboard) lets you monitor and manage your nodes from a web browser. Step 8 of the installer sets up the agent that connects your server to a dashboard.
+
+> **Note:** The dashboard agent is Linux-only. macOS nodes can be monitored via the Health Check tool locally.
+
+**What you need first:**
+- A running operator dashboard (self-hosted or provided by a community member)
+- A dashboard URL (e.g. `https://dashboard.example.com`)
+- An agent token from the dashboard's **Settings → Agents** page
+
+**If you skipped Step 8 during install**, re-run the installer — the agent step appears at the end:
+
+```bash
+sudo bash install.sh
+```
+
+**Verifying the connection:** After install, the agent runs every 60 seconds. Within a minute your server should appear as **online** in the dashboard's Remote Agents list.
+
 ---
 
 ## Upgrading nodes
 
 Run from the menu or directly:
 
+### Linux
 ```bash
 sudo bash upgrade.sh
 ```
 
-All installed nodes are upgraded automatically. The binary is downloaded once and reused for each node.
+### macOS
+```bash
+bash upgrade.sh
+```
+
+All installed nodes are upgraded automatically. The binary is downloaded once, SHA256-verified, and reused for each node.
 
 ---
 
 ## Health Check (doctor.sh)
 
-Scan all running nodes for problems:
-
+### Linux
 ```bash
 sudo bash doctor.sh
+```
+
+### macOS
+```bash
+bash doctor.sh
 ```
 
 The doctor prints a table with one row per node:
@@ -195,13 +260,13 @@ The doctor prints a table with one row per node:
 | Column | What it shows |
 |---|---|
 | **Node** | Node name (snode1, snode2, …) |
-| **Svc** | systemd service state (`active` / `inactive` / `failed`) |
+| **Svc** | Service state (`active` / `inactive` / `failed`) |
 | **Chain** | Sync progress — height vs network tip, or `stuck` / `no data` |
 | **Peers** | Inbound + outbound peer count (green ≥ 3, amber 1–2, red 0) |
 | **Uptime** | How long the daemon process has been running |
 | **RAM** | Current resident memory of the daemon process |
 | **Reg** | Registration state — `reg'd`, `unreg`, `unlock` (14-day lock), `sync` |
-| **FW** | Firewall check — `OK` all ports open, `EXT` listening but no UFW (external firewall), `FAIL` port not reachable, `SCAN` daemon starting up (port opens after initial blockchain scan completes) |
+| **FW** | Firewall check — `OK` all ports open, `EXT` external firewall, `FAIL` port not reachable, `SCAN` daemon starting up |
 | **SN Key** | First 16 characters of the node's ed25519 public key |
 
 When a stuck or corrupt node is detected the doctor offers to restart it automatically before falling back to blockchain replacement.
@@ -210,7 +275,7 @@ When a stuck or corrupt node is detected the doctor offers to restart it automat
 
 ## Reconfigure Firewall (firewall.sh)
 
-Switch firewall mode for all installed nodes without reinstalling:
+**Linux only.** Switch firewall mode for all installed nodes without reinstalling:
 
 ```bash
 sudo bash firewall.sh
@@ -224,8 +289,6 @@ sudo bash firewall.sh
 | **External firewall** | OPNSense, pfSense, or any perimeter firewall — prints the full port list to configure manually |
 | **Remove UFW rules** | Moving from a VPS (UFW) to a location with an external firewall — cleans up node-specific UFW rules |
 
-The script auto-discovers all installed nodes and their ports from the systemd unit files. When enabling UFW it always opens SSH first so you cannot lock yourself out.
-
 > **Quorumnet requires both TCP and UDP.** UFW mode opens quorumnet with a combined rule covering both protocols. External firewall mode lists separate TCP and UDP entries for each node.
 
 ---
@@ -234,8 +297,14 @@ The script auto-discovers all installed nodes and their ports from the systemd u
 
 Move a node from a remote server to this one without losing its identity or blockchain data.
 
+### Linux
 ```bash
 sudo bash server-migrate.sh
+```
+
+### macOS
+```bash
+bash server-migrate.sh
 ```
 
 The tool prompts for the source server hostname/IP and SSH user, tests connectivity, then auto-discovers all nodes on the source server. Select which node to migrate; the script copies the keys and blockchain data, installs the node here, and starts the service.
@@ -257,30 +326,34 @@ Open these ports **inbound** for each node:
 
 Default port spacing is 100 per node: snode2 uses 9330/9332, snode3 uses 9430/9432, etc.
 
-**UFW example (per node):**
+**UFW example (Linux, per node):**
 
 ```bash
 sudo ufw allow 9230/tcp    # P2P
 sudo ufw allow 9232        # Quorumnet — both TCP and UDP
 ```
 
-**Oracle Cloud users:** In addition to UFW, open the equivalent ports in your VCN Security List (OCI Console → Networking → Virtual Cloud Networks → your VCN → Security Lists). The installer's **Oracle Cloud** firewall option also removes the OCI iptables REJECT rule automatically:
+**Oracle Cloud users:** In addition to UFW, open the equivalent ports in your VCN Security List (OCI Console → Networking → Virtual Cloud Networks → your VCN → Security Lists). The installer's **Oracle Cloud** firewall option also removes the OCI iptables REJECT rule automatically.
 
-```bash
-sudo iptables -D INPUT -j REJECT --reject-with icmp-host-prohibited
-```
+**macOS / external firewall users:** Open the ports in your router or OPNSense/pfSense (Firewall → NAT → Port Forward, one rule per port).
 
 ---
 
 ## Remove Nodes (wipe.sh)
 
-Permanently remove all installed nodes from this server:
+Permanently remove all installed nodes from this server.
 
+### Linux
 ```bash
 sudo bash wipe.sh
 ```
 
-This stops and disables all node services, removes all state directories (`/var/lib/xeqm/snodeN`), and removes the shared `xeqm` system user. **This is irreversible** — if any nodes are registered, migrate them first to avoid stake lockout.
+### macOS
+```bash
+bash wipe.sh
+```
+
+This stops and disables all node services, removes all state directories, and removes the binary. **This is irreversible** — if any nodes are registered, migrate them first to avoid stake lockout.
 
 ---
 
@@ -291,22 +364,26 @@ All installer questions can be answered up front on the command line. Anything n
 ### Number of nodes
 
 ```bash
+# Linux
 sudo bash install.sh --nodes 5
+
+# macOS
+bash install.sh --nodes 5
 ```
 
 ### Blockchain source
 
 ```bash
-sudo bash install.sh --copy-blockchain bootstrap          # download bootstrap (recommended)
-sudo bash install.sh --copy-blockchain auto               # copy from existing node on this server
-sudo bash install.sh --copy-blockchain /var/lib/xeqm/snode1  # copy from specific path
-sudo bash install.sh --copy-blockchain no                 # sync fresh from network
+bash install.sh --copy-blockchain bootstrap          # download bootstrap (recommended)
+bash install.sh --copy-blockchain auto               # copy from existing node on this server
+bash install.sh --copy-blockchain /path/to/snode1    # copy from specific path
+bash install.sh --copy-blockchain no                 # sync fresh from network
 ```
 
 ### Custom ports (useful when behind NAT or sharing a public IP)
 
 ```bash
-sudo bash install.sh --nodes 2 --ports p2p:12230+12330,rpc:12231+12331
+bash install.sh --nodes 2 --ports p2p:12230+12330,rpc:12231+12331
 ```
 
 Quorumnet is derived automatically as P2P+2 per node.
@@ -314,13 +391,17 @@ Quorumnet is derived automatically as P2P+2 per node.
 ### Specific version
 
 ```bash
-sudo bash install.sh --version v1.0.7
+bash install.sh --version core-v1.0.7
 ```
 
 ### Fully non-interactive install
 
 ```bash
+# Linux
 sudo bash install.sh --nodes 2 --copy-blockchain bootstrap --open-firewall --quiet
+
+# macOS
+bash install.sh --nodes 1 --copy-blockchain bootstrap --quiet
 ```
 
 ---
@@ -328,8 +409,8 @@ sudo bash install.sh --nodes 2 --copy-blockchain bootstrap --open-firewall --qui
 ## Built-in help
 
 ```bash
-sudo bash install.sh --help
-sudo bash server-migrate.sh --help
-sudo bash upgrade.sh --help
-sudo bash doctor.sh --help
+bash install.sh --help
+bash server-migrate.sh --help
+bash upgrade.sh --help
+bash doctor.sh --help
 ```
