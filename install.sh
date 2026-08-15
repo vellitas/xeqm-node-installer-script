@@ -329,12 +329,15 @@ prompt_binary_source() {
   local existing_bins=""
   find_existing_binaries_on_server existing_bins
 
+  local _compile_label="Compile from source  (slowest, ~1 hour)"
+  [[ "${OS_TYPE}" == "Darwin" ]] && _compile_label="Compile from source  (requires Xcode + Homebrew, ~1 hour)"
+
   local pm__choice
   if [[ -n "${existing_bins}" ]]; then
     prompt_menu "How would you like to get the XEQM node binaries?" pm__choice 1 \
       "Download pre-built binaries from GitHub  (fastest)" \
       "Use existing binaries already on this server  (${existing_bins})" \
-      "Compile from source  (slowest, ~1 hour)"
+      "${_compile_label}"
     case "${pm__choice}" in
       1) config[binary_source]="download" ;;
       2) config[binary_source]="${existing_bins}" ;;
@@ -343,7 +346,7 @@ prompt_binary_source() {
   else
     prompt_menu "How would you like to get the XEQM node binaries?" pm__choice 1 \
       "Download pre-built binaries from GitHub  (fastest)" \
-      "Compile from source  (slowest, ~1 hour)"
+      "${_compile_label}"
     case "${pm__choice}" in
       1) config[binary_source]="download" ;;
       2) config[binary_source]="compile" ;;
@@ -1298,17 +1301,19 @@ wz_nodes() {
 wz_binary_source() {
   local _existing="" _choice
   find_existing_binaries_on_server _existing
+  local _compile_desc="Compile from source (~1 hour)"
+  [[ "${OS_TYPE}" == "Darwin" ]] && _compile_desc="Compile from source (requires Xcode + Homebrew, ~1 hour)"
   if [[ -n "${_existing}" ]]; then
     wt_menu "XEQM Binaries" "How would you like to get the XEQM node binaries?" \
       12 68 3 _choice \
       "Download"  "Download pre-built binaries from GitHub (fastest)" \
       "Existing"  "Use binaries already on this server (${_existing})" \
-      "Compile"   "Compile from source (~1 hour)"
+      "Compile"   "${_compile_desc}"
   else
     wt_menu "XEQM Binaries" "How would you like to get the XEQM node binaries?" \
       10 68 2 _choice \
       "Download"  "Download pre-built binaries from GitHub (fastest)" \
-      "Compile"   "Compile from source (~1 hour)"
+      "Compile"   "${_compile_desc}"
   fi
   local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
   case "${_choice}" in

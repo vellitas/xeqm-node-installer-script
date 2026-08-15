@@ -71,6 +71,9 @@ else
 fi
 readonly XEQM_BIN_DIR XEQM_STATE_BASE XEQM_SVC_DIR XEQM_SVC_LABEL_PREFIX XEQM_RUN_USER _SUDO
 
+# On macOS, download is the only sane default (no release apt/deb packages)
+[[ "${OS_TYPE}" == "Darwin" ]] && config[binary_source]='download'
+
 typeset -A default_service_node_ports
 default_service_node_ports=(
   [p2p_bind_port]=9230
@@ -926,19 +929,42 @@ download_release_binaries() {
     *)             arch_pattern="${host_arch}" ;;
   esac
 
+  # Platform filter: macOS assets are named "macos-*", Linux assets are "linux|ubuntu"
+  local os_pattern
+  [[ "${OS_TYPE}" == "Darwin" ]] && os_pattern='macos|darwin' || os_pattern='linux|ubuntu'
+
+  _extract_url() {
+    local _info="$1"
+    echo "${_info}" \
+      | grep -o '"browser_download_url": "[^"]*"' \
+      | grep -iv '\.sha256' \
+      | grep -iE "${os_pattern}" \
+      | grep -iE "${arch_pattern}" \
+      | head -1 | grep -o 'https://[^"]*'
+  }
+
   local download_url
-  download_url="$(echo "${release_info}" \
-    | grep -o '"browser_download_url": "[^"]*"' \
-    | grep -iv '\.sha256' \
-    | grep -iE 'linux|ubuntu' \
-    | grep -iE "${arch_pattern}" \
-    | head -1 | grep -o 'https://[^"]*')"
+  download_url="$(_extract_url "${release_info}")"
+
+  # Latest release may not have a macOS build (alphas sometimes skip it).
+  # Fall back to scanning all releases for the most recent one with a matching asset.
+  if [[ -z "${download_url}" && "${version}" = "auto" ]]; then
+    echo -e "  Latest release has no ${OS_TYPE}/${host_arch} binary — scanning older releases..." >&2
+    local all_releases
+    all_releases="$(wget --quiet -O - "https://api.github.com/repos/XEQMLabs/xeqm-core/releases" 2>/dev/null)" || true
+    download_url="$(echo "${all_releases}" \
+      | grep -o '"browser_download_url": "[^"]*"' \
+      | grep -iv '\.sha256' \
+      | grep -iE "${os_pattern}" \
+      | grep -iE "${arch_pattern}" \
+      | head -1 | grep -o 'https://[^"]*')"
+  fi
 
   if [[ -z "${download_url}" ]]; then
-    echo -e "\033[0;31merror\033[0m: No Linux ${host_arch} binary found in the GitHub release assets." >&2
-    echo -e "  Available assets for this release:" >&2
+    echo -e "\033[0;31merror\033[0m: No ${OS_TYPE}/${host_arch} binary found in GitHub release assets." >&2
+    echo -e "  Available assets:" >&2
     echo "${release_info}" | grep -o '"browser_download_url": "[^"]*"' | grep -o 'https://[^"]*' | sed 's/^/    /' >&2
-    echo -e "  Use option [3] to compile from source, or place a compatible binary at /opt/xeqm/bin/xeqm-d and use option [2]." >&2
+    echo -e "  Use 'Compile from source' or place a compatible binary at ${XEQM_BIN_DIR}/xeqm-d." >&2
     rm -rf "${tmp_dir}"; exit 1
   fi
 
@@ -1086,17 +1112,20 @@ install_dependencies() {
       exit 1
     fi
     local _missing=()
-    command -v openssl >/dev/null 2>&1 || _missing+=(openssl)
-    command -v gawk    >/dev/null 2>&1 || _missing+=(gawk)
-    command -v rsync   >/dev/null 2>&1 || _missing+=(rsync)
-    # natsort via pip (no brew formula); whiptail not available on macOS — menus fall back to plain prompts
-    if ! python3 -c "import natsort" 2>/dev/null; then
-      echo -e "\n\033[1mInstalling natsort python package...\033[0m"
-      pip3 install --quiet natsort
-    fi
+    command -v openssl  >/dev/null 2>&1 || _missing+=(openssl)
+    command -v gawk     >/dev/null 2>&1 || _missing+=(gawk)
+    command -v rsync    >/dev/null 2>&1 || _missing+=(rsync)
+    command -v wget     >/dev/null 2>&1 || _missing+=(wget)
+    # newt provides whiptail on macOS
+    command -v whiptail >/dev/null 2>&1 || _missing+=(newt)
     if [[ ${#_missing[@]} -gt 0 ]]; then
       echo -e "\n\033[1mInstalling missing dependencies via Homebrew: ${_missing[*]}\033[0m"
       brew install "${_missing[@]}"
+    fi
+    # natsort via pip (no brew formula)
+    if ! python3 -c "import natsort" 2>/dev/null; then
+      echo -e "\n\033[1mInstalling natsort...\033[0m"
+      pip3 install --quiet natsort
     fi
     return 0
   fi
