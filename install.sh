@@ -743,14 +743,15 @@ _copy_chain_state() {
   if [[ -d "${dst}/lmdb" ]]; then
     ${_SUDO} mv "${dst}/lmdb" "${dst}/lmdb_$(printf '%08x' $RANDOM)"
   fi
-  ${_SUDO} cp -R "${src}/lmdb" "${dst}/"
+  [[ -d "${src}/lmdb" ]] && ${_SUDO} cp -R "${src}/lmdb" "${dst}/" || true
   for _db in sqlite.db ons.db; do
     for _sfx in "" "-shm" "-wal"; do
-      [[ -f "${src}/${_db}${_sfx}" ]] && \
+      if [[ -f "${src}/${_db}${_sfx}" ]]; then
         ${_SUDO} cp "${src}/${_db}${_sfx}" "${dst}/${_db}${_sfx}"
+      fi
     done
   done
-  [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R xeqm:xeqm "${dst}"
+  [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R xeqm:xeqm "${dst}" || true
 }
 
 copy_blockchain_to_data_dir() {
