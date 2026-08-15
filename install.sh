@@ -637,12 +637,12 @@ install_manager() {
 
   ensure_xeqm_user
 
-  print_step 1 3 "Installing XEQM binary to /opt/xeqm/bin/"
+  print_step 1 3 "Installing XEQM binary to ${XEQM_BIN_DIR}/"
   install_binary_to_opt
 
   while [ "${idx}" -le "${config[nodes]}" ]; do
     local snode_name="snode$(( start_slot + idx - 1 ))"
-    local data_dir="/var/lib/xeqm/${snode_name}"
+    local data_dir="${XEQM_STATE_BASE}/${snode_name}"
     generate_node_config node_config "${idx}" "${snode_name}" "${data_dir}"
 
     tput rev 2>/dev/null || true; echo -e "\n\033[1m  Service Node ${idx} of ${config[nodes]} — ${snode_name}  \033[0m"; tput sgr0 2>/dev/null || true
@@ -734,7 +734,7 @@ _find_indexed_snode() {
       echo "${_candidate}"
       return 0
     fi
-  done < <(find /var/lib/xeqm -maxdepth 3 -name 'data.mdb' 2>/dev/null | sort)
+  done < <(find "${XEQM_STATE_BASE}" -maxdepth 3 -name 'data.mdb' 2>/dev/null | sort)
 }
 
 # Copy lmdb + sqlite.db + ons.db from $1 into $2 (excludes keys, sockets, logs)
