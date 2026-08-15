@@ -74,6 +74,20 @@ readonly XEQM_BIN_DIR XEQM_STATE_BASE XEQM_SVC_DIR XEQM_SVC_LABEL_PREFIX XEQM_RU
 # On macOS, download is the only sane default (no release apt/deb packages)
 [[ "${OS_TYPE}" == "Darwin" ]] && config[binary_source]='download'
 
+# Provide natsort as a pure-python shell function when the command isn't installed.
+# This covers macOS (pip broken on pre-release OS versions) and any Linux system
+# where python3-natsort wasn't installed. Reads stdin, prints natural-sorted lines.
+if ! command -v natsort >/dev/null 2>&1; then
+  natsort() {
+    python3 - <<'_NATSORT_EOF'
+import re, sys
+def _k(s): return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
+print('\n'.join(sorted(sys.stdin.read().splitlines(), key=_k)))
+_NATSORT_EOF
+  }
+  export -f natsort
+fi
+
 typeset -A default_service_node_ports
 default_service_node_ports=(
   [p2p_bind_port]=9230
@@ -1146,12 +1160,6 @@ install_dependencies() {
       echo -e "\n\033[1mInstalling missing dependencies via Homebrew: ${_missing[*]}\033[0m"
       HOMEBREW_NO_REQUIRE_TAP_TRUST=1 HOMEBREW_NO_AUTO_UPDATE=1 \
         brew install --quiet "${_missing[@]}" <<< "y"
-    fi
-    # natsort via pip (no brew formula); --break-system-packages required on macOS
-    # with externally-managed Python (PEP 668); --user keeps it out of the system tree
-    if ! python3 -c "import natsort" 2>/dev/null; then
-      echo -e "\n\033[1mInstalling natsort...\033[0m"
-      pip3 install --quiet --user --break-system-packages natsort
     fi
     return 0
   fi
