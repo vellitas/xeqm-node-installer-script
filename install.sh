@@ -750,7 +750,7 @@ _copy_chain_state() {
         sudo cp "${src}/${_db}${_sfx}" "${dst}/${_db}${_sfx}"
     done
   done
-  sudo chown -R xeqm:xeqm "${dst}"
+  [[ "${OS_TYPE}" != "Darwin" ]] && sudo chown -R xeqm:xeqm "${dst}"
 }
 
 copy_blockchain_to_data_dir() {
@@ -1310,7 +1310,7 @@ wz_binary_source() {
     wt_menu "XEQM Binaries" "How would you like to get the XEQM node binaries?" \
       12 68 3 _choice \
       "Download"  "Download pre-built binaries from GitHub (fastest)" \
-      "Existing"  "Use binaries already on this server (${_existing})" \
+      "Existing"  "Already installed: ${_existing}" \
       "Compile"   "${_compile_desc}"
   else
     wt_menu "XEQM Binaries" "How would you like to get the XEQM node binaries?" \

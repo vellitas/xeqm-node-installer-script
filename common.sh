@@ -1240,7 +1240,7 @@ download_bootstrap() {
   fi
   ${_SUDO} mkdir -p "${target_dir}"
   ${_SUDO} tar -xzf "${_BOOTSTRAP_CACHE}" -C "${target_dir}"
-  [[ -n "${username}" ]] && ${_SUDO} chown -R "${username}:${username}" "${target_dir}"
+  [[ -n "${username}" && "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R "${username}:${username}" "${target_dir}"
 
   echo -e "\033[1;32mBootstrap extracted successfully.\033[0m"
 }
