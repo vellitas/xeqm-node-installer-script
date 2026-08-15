@@ -1149,30 +1149,80 @@ TIMEREOF
 }
 
 next_steps() {
+  # Discover ALL installed nodes from disk for complete port table
+  declare -A _ns_p2p=()
+  declare -A _ns_qnet=()
+  local -a _ns_names=() _ns_sorted=()
+  local _pf _uf _sn _p2p _qnet
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    while IFS= read -r _pf; do
+      _sn="$(basename "${_pf}" .plist)"
+      _sn="${_sn##*.}"
+      _p2p="$(grep -o -- '--p2p-bind-port=[0-9]*' "${_pf}" | grep -o '[0-9]*$' || true)"
+      _qnet="$(grep -o -- '--quorumnet-port=[0-9]*' "${_pf}" | grep -o '[0-9]*$' || true)"
+      _ns_p2p["${_sn}"]="${_p2p}"
+      _ns_qnet["${_sn}"]="${_qnet}"
+      _ns_names+=("${_sn}")
+    done < <(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
+  else
+    while IFS= read -r _uf; do
+      if grep -q '^User=xeqm$' "${_uf}" 2>/dev/null; then
+        _sn="$(basename "${_uf}" .service)"
+        _sn="${_sn#xeqmnode_}"
+        _p2p="$(grep -o -- '--p2p-bind-port=[0-9]*' "${_uf}" | grep -o '[0-9]*$' || true)"
+        _qnet="$(grep -o -- '--quorumnet-port=[0-9]*' "${_uf}" | grep -o '[0-9]*$' || true)"
+        _ns_p2p["${_sn}"]="${_p2p}"
+        _ns_qnet["${_sn}"]="${_qnet}"
+        _ns_names+=("${_sn}")
+      fi
+    done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' 2>/dev/null | sort)
+  fi
+
+  if [[ "${#_ns_names[@]}" -gt 0 ]]; then
+    mapfile -t _ns_sorted < <(printf '%s\n' "${_ns_names[@]}" | natsort)
+  fi
+
+  tput rev 2>/dev/null || true; echo -e "\n\033[1m  NEXT STEPS — COMPLETE YOUR SETUP  \033[0m"; tput sgr0 2>/dev/null || true
+
+  # [1] Register
+  echo -e "\n\033[1m  [1]  Register each node\033[0m  (run after your wallet is funded)\n"
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "       \033[1mbash ${script_basedir}/register.sh\033[0m"
+  else
+    echo -e "       \033[1msudo bash ${script_basedir}/register.sh\033[0m"
+  fi
+
+  # [2] Firewall ports — all installed nodes
+  echo -e "\n\033[1m  [2]  Open these firewall ports\033[0m\n"
+  if [[ "${#_ns_sorted[@]}" -gt 0 ]]; then
+    for _sn in "${_ns_sorted[@]}"; do
+      printf "       %-14s  p2p %-6s TCP     quorumnet %-6s TCP+UDP\n" \
+        "${_sn}:" "${_ns_p2p[${_sn}]:-?}" "${_ns_qnet[${_sn}]:-?}"
+    done
+  else
+    local start_slot
+    start_slot="$(next_snode_slot)"
+    local install_count="${config[nodes]}"
+    local first_slot=$(( start_slot - install_count ))
+    local idx=1
+    while [ "${idx}" -le "${install_count}" ]; do
+      _sn="snode$(( first_slot + idx - 1 ))"
+      printf "       %-14s  p2p %-6s TCP     quorumnet %-6s TCP+UDP\n" \
+        "${_sn}:" "${config["snode${idx}__p2p_bind_port"]}" "${config["snode${idx}__quorumnet_port"]}"
+      idx=$((idx + 1))
+    done
+  fi
+
+  # [3] Key backup — nodes installed this run only
+  echo -e "\n\033[1m  [3]  Back up your service node keys\033[0m  (losing a key = losing the node)\n"
   local start_slot
   start_slot="$(next_snode_slot)"
   local install_count="${config[nodes]}"
   local first_slot=$(( start_slot - install_count ))
-
-  tput rev 2>/dev/null || true; echo -e "\n\033[1m  NEXT STEPS — COMPLETE YOUR SETUP  \033[0m"; tput sgr0 2>/dev/null || true
-
-  echo -e "\n\033[1m  [1]  Register each node\033[0m  (run after your wallet is funded)\n"
-  echo -e "       \033[1msudo bash ${script_basedir}/register.sh\033[0m"
-
-  echo -e "\n\033[1m  [2]  Open these firewall ports\033[0m\n"
-  idx=1
+  local idx=1
   while [ "${idx}" -le "${install_count}" ]; do
-    local _sn="snode$(( first_slot + idx - 1 ))"
-    local p2p="${config["snode${idx}__p2p_bind_port"]}"
-    local qnet="${config["snode${idx}__quorumnet_port"]}"
-    printf "       %-14s  p2p %-6s TCP     quorumnet %-6s TCP+UDP\n" "${_sn}:" "${p2p}" "${qnet}"
-    idx=$((idx + 1))
-  done
-
-  echo -e "\n\033[1m  [3]  Back up your service node keys\033[0m  (losing a key = losing the node)\n"
-  idx=1
-  while [ "${idx}" -le "${install_count}" ]; do
-    local _sn="snode$(( first_slot + idx - 1 ))"
+    _sn="snode$(( first_slot + idx - 1 ))"
     local _rpc="${config["snode${idx}__rpc_bind_port"]}"
     if [[ "${OS_TYPE}" == "Darwin" ]]; then
       echo -e "       \033[1m${XEQM_BIN_DIR}/xeqm-d print_sn_key --rpc-admin=127.0.0.1:${_rpc}\033[0m"
@@ -1187,25 +1237,42 @@ next_steps() {
     echo -e "\n       Key files: \033[1m/var/lib/xeqm/snodeN/key_bls\033[0m  and  \033[1m/var/lib/xeqm/snodeN/key_ed25519\033[0m\n"
   fi
 
+  # [4] Agent (if installed this run)
   if [[ "${config[agent_installed]:-0}" -eq 1 ]]; then
     echo -e "\n\033[1m  [4]  Operator Dashboard Agent\033[0m\n"
     echo -e "       Agent is installed and reporting to:  \033[1m${config[agent_url]:-your dashboard}\033[0m"
-    echo -e "       Check status:  \033[1msystemctl status xeqm-agent.timer\033[0m"
-    echo -e "       View logs:     \033[1mjournalctl -u xeqm-agent --since today\033[0m\n"
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      echo -e "       Check status:  \033[1mlaunchctl list com.xeqmlabs.agent\033[0m"
+      echo -e "       View logs:     \033[1mtail -f ~/xeqm-agent/xeqm-agent.log\033[0m\n"
+    else
+      echo -e "       Check status:  \033[1msystemctl status xeqm-agent.timer\033[0m"
+      echo -e "       View logs:     \033[1mjournalctl -u xeqm-agent --since today\033[0m\n"
+    fi
   fi
 
+  # External firewall table — all installed nodes
   if [[ "${config[firewall_mode]:-}" = "external" || "${config[firewall_mode]:-}" = "oci" ]]; then
     local -a entries=()
-    idx=1
-    while [ "${idx}" -le "${install_count}" ]; do
-      local _sn="snode$(( first_slot + idx - 1 ))"
-      local p2p="${config["snode${idx}__p2p_bind_port"]}"
-      local quorum="${config["snode${idx}__quorumnet_port"]}"
-      entries+=("${_sn} ${p2p} ${quorum}")
-      idx=$((idx + 1))
-    done
+    if [[ "${#_ns_sorted[@]}" -gt 0 ]]; then
+      for _sn in "${_ns_sorted[@]}"; do
+        entries+=("${_sn} ${_ns_p2p[${_sn}]:-?} ${_ns_qnet[${_sn}]:-?}")
+      done
+    else
+      local idx=1
+      local start_slot
+      start_slot="$(next_snode_slot)"
+      local install_count="${config[nodes]}"
+      local first_slot=$(( start_slot - install_count ))
+      while [ "${idx}" -le "${install_count}" ]; do
+        _sn="snode$(( first_slot + idx - 1 ))"
+        entries+=("${_sn} ${config["snode${idx}__p2p_bind_port"]} ${config["snode${idx}__quorumnet_port"]}")
+        idx=$((idx + 1))
+      done
+    fi
     print_external_firewall_guidance "${entries[@]}"
   fi
+
+  [[ "${XEQM_FROM_MENU:-0}" = "1" ]] && read -rp $'\n  Press Enter to return to the menu...' _
 }
 
 install_usage() {
