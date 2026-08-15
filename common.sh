@@ -1145,7 +1145,8 @@ install_dependencies() {
     command -v whiptail >/dev/null 2>&1 || _missing+=(newt)
     if [[ ${#_missing[@]} -gt 0 ]]; then
       echo -e "\n\033[1mInstalling missing dependencies via Homebrew: ${_missing[*]}\033[0m"
-      brew install "${_missing[@]}"
+      HOMEBREW_NO_REQUIRE_TAP_TRUST=1 HOMEBREW_NO_AUTO_UPDATE=1 \
+        brew install --quiet "${_missing[@]}" <<< "y"
     fi
     # natsort via pip (no brew formula)
     if ! python3 -c "import natsort" 2>/dev/null; then
