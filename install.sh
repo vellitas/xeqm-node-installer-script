@@ -741,16 +741,16 @@ _find_indexed_snode() {
 _copy_chain_state() {
   local src="$1" dst="$2"
   if [[ -d "${dst}/lmdb" ]]; then
-    sudo mv "${dst}/lmdb" "${dst}/lmdb_$(echo $RANDOM | md5sum | head -c 8)"
+    ${_SUDO} mv "${dst}/lmdb" "${dst}/lmdb_$(printf '%08x' $RANDOM)"
   fi
-  sudo cp -R "${src}/lmdb" "${dst}/"
+  ${_SUDO} cp -R "${src}/lmdb" "${dst}/"
   for _db in sqlite.db ons.db; do
     for _sfx in "" "-shm" "-wal"; do
       [[ -f "${src}/${_db}${_sfx}" ]] && \
-        sudo cp "${src}/${_db}${_sfx}" "${dst}/${_db}${_sfx}"
+        ${_SUDO} cp "${src}/${_db}${_sfx}" "${dst}/${_db}${_sfx}"
     done
   done
-  [[ "${OS_TYPE}" != "Darwin" ]] && sudo chown -R xeqm:xeqm "${dst}"
+  [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R xeqm:xeqm "${dst}"
 }
 
 copy_blockchain_to_data_dir() {
