@@ -968,11 +968,36 @@ download_release_binaries() {
     rm -rf "${tmp_dir}"; exit 1
   fi
 
+  # Derive the .sha256 sidecar URL (same name + .sha256)
+  local sha256_url="${download_url}.sha256"
+
   echo -e "  Downloading: ${download_url##*/}" >&2
   wget --progress=bar:force:noscroll -O "${tmp_dir}/release.archive" "${download_url}" || {
     echo -e "\033[0;31merror\033[0m: Download failed." >&2
     rm -rf "${tmp_dir}"; exit 1
   }
+
+  # Verify SHA256 if the sidecar is available
+  echo -e "  Verifying SHA256..." >&2
+  local expected_sha256
+  expected_sha256="$(wget --quiet -O - "${sha256_url}" 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -n "${expected_sha256}" ]]; then
+    local actual_sha256
+    if [[ "${OS_TYPE}" == "Darwin" ]]; then
+      actual_sha256="$(shasum -a 256 "${tmp_dir}/release.archive" | awk '{print $1}')"
+    else
+      actual_sha256="$(sha256sum "${tmp_dir}/release.archive" | awk '{print $1}')"
+    fi
+    if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
+      echo -e "\033[0;31merror\033[0m: SHA256 mismatch — archive may be corrupted or tampered with." >&2
+      echo -e "  Expected: ${expected_sha256}" >&2
+      echo -e "  Got:      ${actual_sha256}" >&2
+      rm -rf "${tmp_dir}"; exit 1
+    fi
+    echo -e "  \033[1;32mSHA256 OK\033[0m  (${actual_sha256:0:16}...)" >&2
+  else
+    echo -e "  \033[0;33mWarning:\033[0m No SHA256 sidecar found — skipping integrity check." >&2
+  fi
 
   echo -e "\n\033[1mExtracting binaries...\033[0m" >&2
   case "${download_url}" in
