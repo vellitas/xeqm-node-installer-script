@@ -1187,10 +1187,10 @@ TIMEREOF
 }
 
 next_steps() {
-  # Discover ALL installed nodes from disk for complete port table
-  declare -A _ns_p2p=()
-  declare -A _ns_qnet=()
-  local -a _ns_names=() _ns_sorted=()
+  # Discover ALL installed nodes from disk for complete port table.
+  # Use a plain indexed array of "snodeName p2pPort qnetPort" strings to avoid
+  # declare -A associative arrays, which have macOS bash compatibility issues.
+  local -a _ns_lines=()
   local _pf _uf _sn _p2p _qnet
 
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
@@ -1199,9 +1199,7 @@ next_steps() {
       _sn="${_sn##*.}"
       _p2p="$(grep -o -- '--p2p-bind-port=[0-9]*' "${_pf}" | grep -o '[0-9]*$' || true)"
       _qnet="$(grep -o -- '--quorumnet-port=[0-9]*' "${_pf}" | grep -o '[0-9]*$' || true)"
-      _ns_p2p["${_sn}"]="${_p2p}"
-      _ns_qnet["${_sn}"]="${_qnet}"
-      _ns_names+=("${_sn}")
+      _ns_lines+=("${_sn} ${_p2p:-?} ${_qnet:-?}")
     done < <(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | sort)
   else
     while IFS= read -r _uf; do
@@ -1210,15 +1208,9 @@ next_steps() {
         _sn="${_sn#xeqmnode_}"
         _p2p="$(grep -o -- '--p2p-bind-port=[0-9]*' "${_uf}" | grep -o '[0-9]*$' || true)"
         _qnet="$(grep -o -- '--quorumnet-port=[0-9]*' "${_uf}" | grep -o '[0-9]*$' || true)"
-        _ns_p2p["${_sn}"]="${_p2p}"
-        _ns_qnet["${_sn}"]="${_qnet}"
-        _ns_names+=("${_sn}")
+        _ns_lines+=("${_sn} ${_p2p:-?} ${_qnet:-?}")
       fi
     done < <(find /etc/systemd/system -maxdepth 1 -name 'xeqmnode_snode*.service' 2>/dev/null | sort)
-  fi
-
-  if [[ "${#_ns_names[@]}" -gt 0 ]]; then
-    mapfile -t _ns_sorted < <(printf '%s\n' "${_ns_names[@]}" | natsort)
   fi
 
   tput rev 2>/dev/null || true; echo -e "\n\033[1m  NEXT STEPS — COMPLETE YOUR SETUP  \033[0m"; tput sgr0 2>/dev/null || true
@@ -1233,11 +1225,11 @@ next_steps() {
 
   # [2] Firewall ports — all installed nodes
   echo -e "\n\033[1m  [2]  Open these firewall ports\033[0m\n"
-  if [[ "${#_ns_sorted[@]}" -gt 0 ]]; then
-    for _sn in "${_ns_sorted[@]}"; do
+  if [[ "${#_ns_lines[@]}" -gt 0 ]]; then
+    while IFS=' ' read -r _sn _p2p _qnet; do
       printf "       %-14s  p2p %-6s TCP     quorumnet %-6s TCP+UDP\n" \
-        "${_sn}:" "${_ns_p2p[${_sn}]:-?}" "${_ns_qnet[${_sn}]:-?}"
-    done
+        "${_sn}:" "${_p2p}" "${_qnet}"
+    done < <(printf '%s\n' "${_ns_lines[@]}" | natsort)
   else
     local start_slot
     start_slot="$(next_snode_slot)"
