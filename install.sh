@@ -479,12 +479,12 @@ ports_option_handler() {
 }
 
 valid_manual_port_string_format() {
-  [[
-    "$(echo "$1" | grep -oP -e "^[a-z2]{3}:[0-9+]+,[a-z2]{3}:[0-9+]+$" | grep -oE -e "p2p:[0-9+]+" -e "rpc:[0-9+]+" | wc -l )" -eq 2 &&
-    "$(echo "$1" | grep -oP -e 'p2p:[0-9+]+' | grep -oP -e "(?<=p2p:|\+)[0-9]+" | wc -l )" -eq "${config[nodes]}" &&
-    "$(echo "$1" | grep -oP -e 'rpc:[0-9+]+' | grep -oP -e "(?<=rpc:|\+)[0-9]+" | wc -l )" -eq "${config[nodes]}" &&
-    "$(echo "$1" | grep -oP -e '(?<=p2p:|rpc:|\+)+[0-9]+' | natsort | uniq | wc -l)" -eq "$((config[nodes] * 2))"
-  ]]
+  local _n="${config[nodes]}" _p2p_count _rpc_count _uniq_count
+  echo "$1" | grep -qE "^(p2p:[0-9+]+,rpc:[0-9+]+|rpc:[0-9+]+,p2p:[0-9+]+)$" || return 1
+  _p2p_count="$(echo "$1" | grep -oE 'p2p:[0-9+]+' | cut -d: -f2 | tr '+' '\n' | grep -c '[0-9]' || true)"
+  _rpc_count="$(echo "$1" | grep -oE 'rpc:[0-9+]+' | cut -d: -f2 | tr '+' '\n' | grep -c '[0-9]' || true)"
+  _uniq_count="$(echo "$1" | grep -oE '[0-9]+' | sort -u | wc -l | tr -d ' ')"
+  [[ "${_p2p_count}" -eq "${_n}" && "${_rpc_count}" -eq "${_n}" && "${_uniq_count}" -eq "$(( _n * 2 ))" ]]
 }
 
 parse_manual_port_string_and_set_config_if_valid() {
