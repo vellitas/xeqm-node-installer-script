@@ -859,6 +859,8 @@ watch_daemon_status() {
   local _status="Daemon initializing..." _detail=""
   local info="" height="" target_height=""
   local _synced_checks=0  # consecutive checks where target_height=0 and height stable
+  local _init_stall=0    # consecutive RPC-silent ticks; bail after 180 (30 min)
+  local _max_init_stall=180
 
   # Extract snode name (xeqmnode_snodeN → snodeN)
   local _snode_name="${svc_name#xeqmnode_}"
@@ -973,14 +975,24 @@ watch_daemon_status() {
             local _sp=$(( ${_sc:-0} * 100 / _st ))
             _status="Indexing chain data"
             _detail="  ${_sp}%  (${_sc:-0} / ${_st} blocks scanned)"
+            _init_stall=0
           else
             _status="Daemon initializing..."
             _detail=""
+            _init_stall=$(( _init_stall + 1 ))
           fi
         else
           _status="Daemon initializing..."
           _detail=""
+          _init_stall=$(( _init_stall + 1 ))
         fi
+        if [[ "${_init_stall}" -ge "${_max_init_stall}" ]]; then
+          printf "\r  \033[1;33mDaemon did not initialize after 30 min — check logs, continuing install.\033[0m%-10s\n" ""
+          printf "  \033[0;33m  journalctl -u %s -n 50 --no-pager\033[0m\n" "${svc_name}"
+          break
+        fi
+      else
+        _init_stall=0
       fi
     fi
 
