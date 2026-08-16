@@ -622,8 +622,10 @@ install_binary_to_opt() {
 
   ${_SUDO} mkdir -p "${opt_bin}"
 
-  # When version=auto, reuse existing symlink if present rather than re-downloading/compiling.
-  if [[ "${version}" = "auto" && -x "${symlink}" && "${config[force_install]:-0}" -ne 1 ]]; then
+  # When version=auto, reuse existing symlink rather than re-downloading/recompiling.
+  # Do NOT skip when --copy-binaries was given (binary_source is a path, not download/compile).
+  if [[ "${version}" = "auto" && -x "${symlink}" && "${config[force_install]:-0}" -ne 1 \
+        && ( "${binary_source}" = "download" || "${binary_source}" = "compile" ) ]]; then
     local current_ver
     current_ver="$("${symlink}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || echo 'unknown')"
     echo -e "\n  Binary already installed: ${symlink} (v${current_ver}) — skipping install"
