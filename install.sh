@@ -958,8 +958,21 @@ watch_daemon_status() {
         _status="Waiting for peer confirmation"
         _detail="  (height=${height})"
       else
-        # RPC not yet up — check journal for internal blockchain scan progress
+        # RPC not yet up — first check if the service is in a hard-failure state
         _synced_checks=0
+        if [[ "${OS_TYPE}" != "Darwin" ]]; then
+          local _svc_result
+          _svc_result="$(sudo systemctl show "${svc_name}" -p Result --value 2>/dev/null || true)"
+          if [[ "${_svc_result}" = "core-dump" || "${_svc_result}" = "exit-code" || "${_svc_result}" = "signal" ]]; then
+            local _svc_exit
+            _svc_exit="$(sudo systemctl show "${svc_name}" -p ExecMainStatus --value 2>/dev/null || true)"
+            printf "\r  \033[0;31m✗ Service crashed (Result=%s, exit=%s) — installation cannot continue.\033[0m%-10s\n" \
+              "${_svc_result}" "${_svc_exit:-?}" ""
+            printf "  \033[0;33m  sudo journalctl -u %s -n 30 --no-pager\033[0m\n" "${svc_name}"
+            return 1
+          fi
+        fi
+        # Check journal for internal blockchain scan progress
         local _scan_line _sc _st
         local _scan_src
         if [[ "${OS_TYPE}" == "Darwin" ]]; then

@@ -699,6 +699,26 @@ install_binary_to_opt() {
   fi
 
   ${_SUDO} ln -sf "${versioned_bin}" "${symlink}"
+
+  # Verify binary executes on this CPU — catches SIGILL from AVX2/AVX-512 incompatibility
+  # before any service nodes are installed.
+  if [[ "${OS_TYPE}" != "Darwin" ]]; then
+    local _test_rc=0
+    timeout 5 "${symlink}" --version >/dev/null 2>&1 || _test_rc=$?
+    if [[ "${_test_rc}" -eq 132 ]]; then
+      ${_SUDO} rm -f "${versioned_bin}" 2>/dev/null || true
+      ${_SUDO} rm -f "${symlink}" 2>/dev/null || true
+      local _cpu_model
+      _cpu_model="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo 'unknown')"
+      echo -e "\n\033[0;31merror\033[0m: The binary is not compatible with this CPU (SIGILL — illegal instruction)." >&2
+      echo -e "  CPU: ${_cpu_model}" >&2
+      echo -e "  The prebuilt release requires CPU extensions (e.g. AVX2) that this processor lacks." >&2
+      echo -e "  Compile from source on this machine:" >&2
+      echo -e "    sudo bash install.sh --binary-source compile" >&2
+      exit 1
+    fi
+  fi
+
   echo -e "\n  \033[1;32mBinary installed:\033[0m ${versioned_bin}"
   echo -e "  \033[1;32mSymlink updated:\033[0m  ${symlink} -> ${versioned_bin}"
 }
