@@ -480,10 +480,17 @@ ports_option_handler() {
 
 valid_manual_port_string_format() {
   local _n="${config[nodes]}" _p2p_count _rpc_count _uniq_count
+  local _p2p_part _rpc_part
+  # Basic structure check (POSIX ERE — compatible with BSD and GNU grep)
   echo "$1" | grep -qE "^(p2p:[0-9+]+,rpc:[0-9+]+|rpc:[0-9+]+,p2p:[0-9+]+)$" || return 1
-  _p2p_count="$(echo "$1" | grep -oE 'p2p:[0-9+]+' | cut -d: -f2 | tr '+' '\n' | grep -c '[0-9]' || true)"
-  _rpc_count="$(echo "$1" | grep -oE 'rpc:[0-9+]+' | cut -d: -f2 | tr '+' '\n' | grep -c '[0-9]' || true)"
-  _uniq_count="$(echo "$1" | grep -oE '[0-9]+' | sort -u | wc -l | tr -d ' ')"
+  # Extract the numeric portion only (strips "p2p:"/"rpc:" prefix to avoid the '2' in 'p2p')
+  _p2p_part="$(echo "$1" | grep -oE 'p2p:[0-9+]+' | cut -d: -f2)"
+  _rpc_part="$(echo "$1"  | grep -oE 'rpc:[0-9+]+' | cut -d: -f2)"
+  # Count ports by counting '+' separators and adding 1
+  _p2p_count=$(( $(printf '%s' "${_p2p_part}" | tr -cd '+' | wc -c | tr -d ' ') + 1 ))
+  _rpc_count=$(( $(printf '%s' "${_rpc_part}"  | tr -cd '+' | wc -c | tr -d ' ') + 1 ))
+  # Uniqueness check: expand both port lists and count distinct values
+  _uniq_count="$(printf '%s\n%s' "${_p2p_part}" "${_rpc_part}" | tr '+' '\n' | sort -u | grep -c '[0-9]' || true)"
   [[ "${_p2p_count}" -eq "${_n}" && "${_rpc_count}" -eq "${_n}" && "${_uniq_count}" -eq "$(( _n * 2 ))" ]]
 }
 
