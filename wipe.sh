@@ -186,7 +186,11 @@ wipe_run() {
       local layout="${entry%%:*}"
       local name="${entry##*:}"
       local _state="stopped"
-      systemctl is-active --quiet "xeqmnode_${name}.service" 2>/dev/null && _state="running"
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        [[ "$(svc_status "${name}" 2>/dev/null)" == "running" ]] && _state="running"
+      else
+        systemctl is-active --quiet "xeqmnode_${name}.service" 2>/dev/null && _state="running"
+      fi
       checklist_args+=( "${entry}" "(${layout}, ${_state})" "OFF" )
     done
 
@@ -274,9 +278,11 @@ wipe_run() {
     fi
   done
 
-  echo -e "\n\033[1mReloading systemd daemon...\033[0m"
-  sudo systemctl daemon-reload
-  sudo systemctl reset-failed 2>/dev/null || true
+  if [[ "${OS_TYPE}" != "Darwin" ]]; then
+    echo -e "\n\033[1mReloading systemd daemon...\033[0m"
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed 2>/dev/null || true
+  fi
 
   local -a remaining_canonical=()
   discover_canonical_snodes remaining_canonical
@@ -288,15 +294,23 @@ wipe_run() {
     if [[ "${had_canonical}" -eq 1 ]]; then
       echo ""
       local _yn
-      read -rp $'\033[1mNo canonical nodes remain. Remove /opt/xeqm/bin/?\e[0m [y/N]: ' _yn
-      if [[ "${_yn,,}" = "y" ]]; then
-        sudo rm -rf /opt/xeqm/bin
-        echo -e "  Removed /opt/xeqm/bin"
-      fi
-      read -rp $'\033[1mRemove shared xeqm system user?\e[0m [y/N]: ' _yn
-      if [[ "${_yn,,}" = "y" ]]; then
-        sudo userdel xeqm 2>/dev/null || true
-        echo -e "  Removed user xeqm"
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        read -rp $'\033[1mNo canonical nodes remain. Remove ~/xeqm-bin/?\e[0m [y/N]: ' _yn
+        if [[ "${_yn,,}" = "y" ]]; then
+          rm -rf "${XEQM_BIN_DIR}"
+          echo -e "  Removed ${XEQM_BIN_DIR}"
+        fi
+      else
+        read -rp $'\033[1mNo canonical nodes remain. Remove /opt/xeqm/bin/?\e[0m [y/N]: ' _yn
+        if [[ "${_yn,,}" = "y" ]]; then
+          sudo rm -rf /opt/xeqm/bin
+          echo -e "  Removed /opt/xeqm/bin"
+        fi
+        read -rp $'\033[1mRemove shared xeqm system user?\e[0m [y/N]: ' _yn
+        if [[ "${_yn,,}" = "y" ]]; then
+          sudo userdel xeqm 2>/dev/null || true
+          echo -e "  Removed user xeqm"
+        fi
       fi
     fi
   fi
