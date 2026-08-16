@@ -1012,8 +1012,6 @@ watch_daemon_status() {
           printf "  \033[0;33m  journalctl -u %s -n 50 --no-pager\033[0m\n" "${svc_name}"
           break
         fi
-      else
-        _init_stall=0
       fi
     fi
 
