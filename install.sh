@@ -222,19 +222,26 @@ validate_parsed_command_line_args() {
   validate_command_line_option_combinations valid_option_combinations
 }
 
-# Canonical-layout capacity formula — calibrated from real fleet data (maple VPS, 2026-08):
-#   20 nodes on 11.4 GB / 6-core / 96 GB: avg RSS 351 MB/node, 875 MB disk/node, 9.76 GB RAM still available
-#   RAM: 400 MB/node (conservative RSS ceiling), 1 GB system reserve
-#   Disk: 1.5 GB/node (current 875 MB + growth buffer), 5 GB system reserve
-#   CPU: 8 nodes/core (not binding in practice; soft cap)
+# Canonical-layout capacity formula:
+#   RAM: 600 MB/node (peak quorum load, not idle RSS), 1.5 GB system reserve
+#   Disk: 1.5 GB/node, 5 GB system reserve
+#   CPU: 1 GHz-core per node — cores × MHz/1000 — penalises slow clocks (e.g. N3450@1.1GHz=4)
 _calculate_max_nodes() {
   local _total_ram_mb=$(( system_info[memory] / 1024 ))
   local _free_disk_mb=$(( system_info[free_space_var_lib] / 1024 ))
   local _ncpu; _ncpu="$(nproc 2>/dev/null || echo 1)"
 
-  _max_by_ram=$(( (_total_ram_mb - 1024) / 400 ))
+  # Read current CPU MHz; fall back to 2000 if unavailable (e.g. macOS)
+  local _cpu_mhz=2000
+  local _raw_mhz
+  _raw_mhz="$(grep -m1 'cpu MHz' /proc/cpuinfo 2>/dev/null | awk '{printf "%d", $4}' || true)"
+  [[ "${_raw_mhz}" =~ ^[0-9]+$ && "${_raw_mhz}" -gt 0 ]] && _cpu_mhz="${_raw_mhz}"
+  local _ghz_cores=$(( _ncpu * _cpu_mhz / 1000 ))
+  [[ "${_ghz_cores}" -lt 1 ]] && _ghz_cores=1
+
+  _max_by_ram=$(( (_total_ram_mb - 1536) / 600 ))
   _max_by_disk=$(( (_free_disk_mb - 5120) / 1536 ))
-  _max_by_cpu=$(( _ncpu * 8 ))
+  _max_by_cpu="${_ghz_cores}"
 
   [[ "${_max_by_ram}"  -lt 1 ]] && _max_by_ram=1
   [[ "${_max_by_disk}" -lt 1 ]] && _max_by_disk=1
@@ -247,7 +254,7 @@ _calculate_max_nodes() {
   fi
   if [[ "${_max_by_cpu}" -lt "${_max_nodes}" ]]; then
     _max_nodes="${_max_by_cpu}"
-    _limit_reason="CPU cores"
+    _limit_reason="CPU (${_ncpu} cores × ${_cpu_mhz} MHz)"
   fi
 }
 
@@ -257,6 +264,7 @@ prompt_nodes_count() {
 
   echo -e "\n  This server can support up to \033[1m${max_nodes}\033[0m node(s) based on available ${limit_reason}."
   echo -e "  (RAM: ${_max_by_ram}  |  Disk: ${_max_by_disk}  |  CPU: ${_max_by_cpu} — limited by ${limit_reason})"
+  echo -e "  \033[0;33mThis is a hardware estimate. Actual capacity depends on workload.\033[0m"
 
   while true; do
     read -rp $'\n\033[1mHow many service nodes would you like to install?\e[0m [1]: ' count
