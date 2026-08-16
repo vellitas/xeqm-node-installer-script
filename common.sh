@@ -659,11 +659,13 @@ install_binary_to_opt() {
     ${_SUDO} cp "${bins_path}/xeqm-d" "${versioned_bin}"
     ${_SUDO} chmod 755 "${versioned_bin}"
     for _bin in "${bins_path}"/*; do
-      [[ -f "${_bin}" && -x "${_bin}" ]] || continue
       _bname="$(basename "${_bin}")"
-      [[ "${_bname}" = "xeqm-d" ]] && continue
-      ${_SUDO} cp "${_bin}" "${opt_bin}/${_bname}"
-      ${_SUDO} chmod 755 "${opt_bin}/${_bname}"
+      if [[ -d "${_bin}" ]]; then
+        ${_SUDO} cp -R "${_bin}" "${opt_bin}/${_bname}"
+      elif [[ -f "${_bin}" && -x "${_bin}" && "${_bname}" != "xeqm-d" ]]; then
+        ${_SUDO} cp "${_bin}" "${opt_bin}/${_bname}"
+        ${_SUDO} chmod 755 "${opt_bin}/${_bname}"
+      fi
     done
     rm -rf "$(dirname "${bins_path}")"
   elif [[ -n "${binary_source}" && -x "${binary_source}/xeqm-d" ]]; then
@@ -671,11 +673,13 @@ install_binary_to_opt() {
     ${_SUDO} cp "${binary_source}/xeqm-d" "${versioned_bin}"
     ${_SUDO} chmod 755 "${versioned_bin}"
     for _bin in "${binary_source}"/*; do
-      [[ -f "${_bin}" && -x "${_bin}" ]] || continue
       _bname="$(basename "${_bin}")"
-      [[ "${_bname}" = "xeqm-d" ]] && continue
-      ${_SUDO} cp "${_bin}" "${opt_bin}/${_bname}"
-      ${_SUDO} chmod 755 "${opt_bin}/${_bname}"
+      if [[ -d "${_bin}" ]]; then
+        ${_SUDO} cp -R "${_bin}" "${opt_bin}/${_bname}"
+      elif [[ -f "${_bin}" && -x "${_bin}" && "${_bname}" != "xeqm-d" ]]; then
+        ${_SUDO} cp "${_bin}" "${opt_bin}/${_bname}"
+        ${_SUDO} chmod 755 "${opt_bin}/${_bname}"
+      fi
     done
   else
     echo -e "\033[0;31merror\033[0m: Binary source '${binary_source}' is not valid or xeqm-d not found."
