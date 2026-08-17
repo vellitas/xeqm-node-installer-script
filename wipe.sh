@@ -295,6 +295,20 @@ wipe_run() {
       echo ""
       local _yn
       if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        local _agent_plist="${HOME}/Library/LaunchAgents/com.xeqmlabs.agent.plist"
+        local _agent_dir="${HOME}/xeqm-agent"
+        if [[ -f "${_agent_plist}" ]]; then
+          launchctl unload "${_agent_plist}" 2>/dev/null || true
+          rm -f "${_agent_plist}"
+          echo -e "  Unloaded and removed: ${_agent_plist}"
+        fi
+        if [[ -d "${_agent_dir}" ]]; then
+          read -rp $'\033[1mRemove ~/xeqm-agent/ (agent files + config)?\e[0m [y/N]: ' _yn
+          if [[ "${_yn,,}" = "y" ]]; then
+            rm -rf "${_agent_dir}"
+            echo -e "  Removed ${_agent_dir}"
+          fi
+        fi
         read -rp $'\033[1mNo canonical nodes remain. Remove ~/xeqm-bin/?\e[0m [y/N]: ' _yn
         if [[ "${_yn,,}" = "y" ]]; then
           rm -rf "${XEQM_BIN_DIR}"
