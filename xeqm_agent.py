@@ -806,6 +806,7 @@ def build_payload(rpc_urls: list[str],
         "host_fd_used": host_fd_used,
         "ntp_synchronized": check_ntp_sync(),
         "peer_counts": peer_counts,
+        "platform": sys.platform,
         **metrics,
     }
 
@@ -1821,13 +1822,60 @@ def _perform_rollback_darwin(status_fn, label: str,
     return True
 
 
+def _resolve_darwin_asset_url(target_version: str, fallback_url: str) -> str:
+    """Look up the macOS arm64 release asset for target_version from the GitHub API.
+
+    The dashboard runs on Linux and constructs the asset_url from a Linux release.
+    The macOS agent needs the darwin/arm64 tarball, not the linux/x86_64 one.
+    Falls back to fallback_url on any lookup failure so the caller can still try.
+    """
+    import re as _re
+    m = _re.match(r"(\d+\.\d+\.\d+)", target_version)
+    tag = f"v{m.group(1)}" if m else None
+    arch_pat = _re.compile(r"aarch64|arm64", _re.I)
+    os_pat = _re.compile(r"macos|darwin", _re.I)
+
+    def _pick_asset(data: dict) -> str | None:
+        for asset in data.get("assets", []):
+            name = asset.get("name", "")
+            if os_pat.search(name) and arch_pat.search(name) and not name.endswith(".sha256"):
+                url = asset.get("browser_download_url", "")
+                if url:
+                    print(f"[suds] resolved macOS asset: {name}")
+                    return url
+        return None
+
+    try:
+        headers = {"User-Agent": f"XEQM-Agent/{AGENT_VERSION}"}
+        candidates = []
+        if tag:
+            candidates.append(
+                f"https://api.github.com/repos/XEQMLabs/xeqm-core/releases/tags/{tag}"
+            )
+        candidates.append(
+            "https://api.github.com/repos/XEQMLabs/xeqm-core/releases/latest"
+        )
+        for api_url in candidates:
+            req = urllib.request.Request(api_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            found = _pick_asset(data)
+            if found:
+                return found
+            if api_url != candidates[-1]:
+                print(f"[suds] no macOS asset for {tag} — trying latest release")
+    except Exception as e:
+        print(f"[suds] macOS asset lookup failed: {e} — using provided url", file=sys.stderr)
+    return fallback_url
+
+
 def _execute_upgrade_command_darwin(cmd: dict, dashboard_url: str, token: str,
                                     rpc_timeout: float) -> None:
     """Full SUDS upgrade on macOS: launchctl stop/start, no sudo, user-owned binaries."""
     cid = cmd["id"]
     pubkey = cmd["pubkey"]
     target_version = cmd["target_version"]
-    asset_url = cmd["asset_url"]
+    asset_url = _resolve_darwin_asset_url(cmd["target_version"], cmd["asset_url"])
 
     def status(s: str, **kw) -> None:
         post_upgrade_status(dashboard_url, token, cid, s, **kw)
