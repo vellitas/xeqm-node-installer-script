@@ -1453,15 +1453,20 @@ wz_nodes() {
   local _detail="RAM: ${_max_by_ram}  |  Disk: ${_max_by_disk}  |  CPU: ${_max_by_cpu}"
 
   # Count already-installed snode units so the user knows what "additional" means
-  local _existing _existing_note=""
-  _existing="$(systemctl list-units 'xeqmnode_snode*.service' --no-pager --no-legend 2>/dev/null | wc -l)"
+  local _existing _existing_note="" _prompt_verb="service nodes"
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    _existing="$(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | wc -l | tr -d ' ')"
+  else
+    _existing="$(systemctl list-units 'xeqmnode_snode*.service' --no-pager --no-legend 2>/dev/null | wc -l)"
+  fi
   if [[ "${_existing}" -gt 0 ]]; then
+    _prompt_verb="additional service nodes"
     _existing_note="\n\nNote: ${_existing} node(s) already installed on this server.\nEnter how many ADDITIONAL nodes to install."
   fi
 
   while true; do
     wt_inputbox "Service Nodes" \
-      "How many additional service nodes would you like to install?\n\nThis server supports up to ${_max} more node(s) based on ${_reason}.\n(${_detail})${_existing_note}\n\nLeave blank to default to 1:" \
+      "How many ${_prompt_verb} would you like to install?\n\nThis server supports up to ${_max} more node(s) based on ${_reason}.\n(${_detail})${_existing_note}\n\nLeave blank to default to 1:" \
       17 66 _val ""
     local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
     _val="${_val:-1}"
