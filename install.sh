@@ -1283,10 +1283,10 @@ next_steps() {
   # External firewall table — all installed nodes
   if [[ "${config[firewall_mode]:-}" = "external" || "${config[firewall_mode]:-}" = "oci" ]]; then
     local -a entries=()
-    if [[ "${#_ns_sorted[@]}" -gt 0 ]]; then
-      for _sn in "${_ns_sorted[@]}"; do
-        entries+=("${_sn} ${_ns_p2p[${_sn}]:-?} ${_ns_qnet[${_sn}]:-?}")
-      done
+    if [[ "${#_ns_lines[@]}" -gt 0 ]]; then
+      while IFS=' ' read -r _sn _p2p _qnet; do
+        entries+=("${_sn} ${_p2p} ${_qnet}")
+      done < <(printf '%s\n' "${_ns_lines[@]}" | natsort)
     else
       local idx=1
       local start_slot

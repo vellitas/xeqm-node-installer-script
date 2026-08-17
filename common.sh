@@ -79,11 +79,13 @@ readonly XEQM_BIN_DIR XEQM_STATE_BASE XEQM_SVC_DIR XEQM_SVC_LABEL_PREFIX XEQM_RU
 # where python3-natsort wasn't installed. Reads stdin, prints natural-sorted lines.
 if ! command -v natsort >/dev/null 2>&1; then
   natsort() {
-    python3 - <<'_NATSORT_EOF'
+    # Use -c so the script is an argument, leaving stdin free for piped input.
+    # python3 - <<'HEREDOC' replaces stdin with the heredoc, breaking pipelines.
+    python3 -c '
 import re, sys
-def _k(s): return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', s)]
-print('\n'.join(sorted(sys.stdin.read().splitlines(), key=_k)))
-_NATSORT_EOF
+def _k(s): return [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", s)]
+print("\n".join(sorted(sys.stdin.read().splitlines(), key=_k)))
+'
   }
   export -f natsort
 fi
