@@ -1690,6 +1690,249 @@ def _execute_companion_upgrade(cmd: dict, dashboard_url: str, token: str) -> Non
            prior_version=prior_version, backup_path=ts_str)
 
 
+# ── macOS (launchd) SUDS helpers ──────────────────────────────────────────────
+
+def _get_plist_binary_path(label: str) -> str | None:
+    """Return ProgramArguments[0] from ~/Library/LaunchAgents/<label>.plist."""
+    import xml.etree.ElementTree as ET
+    plist_path = os.path.expanduser(f"~/Library/LaunchAgents/{label}.plist")
+    try:
+        root = ET.parse(plist_path).getroot()
+        top_dict = root.find("dict")
+        if top_dict is None:
+            return None
+        children = list(top_dict)
+        for i, child in enumerate(children):
+            if child.tag == "key" and child.text == "ProgramArguments":
+                if i + 1 < len(children) and children[i + 1].tag == "array":
+                    strings = children[i + 1].findall("string")
+                    if strings and strings[0].text:
+                        return strings[0].text
+                break
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_upgrade_target_darwin(pubkey: str, rpc_timeout: float) -> tuple[str, str] | None:
+    """Return (launchd_label, exec_dir) for pubkey on macOS, or None."""
+    for label, rpc_url in discover_launchd_units():
+        if get_pubkey(rpc_url, rpc_timeout) == pubkey:
+            bin_path = _get_plist_binary_path(label)
+            if bin_path:
+                return label, os.path.dirname(bin_path)
+    return None
+
+
+def _launchd_stop(label: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["launchctl", "stop", label],
+                           capture_output=True, text=True, timeout=180)
+        if r.returncode == 0:
+            return True, ""
+        return False, (r.stderr or "").strip() or f"exit {r.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "launchctl stop timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def _launchd_start(label: str) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(["launchctl", "start", label],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return True, ""
+        return False, (r.stderr or "").strip() or f"exit {r.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "launchctl start timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def _launchd_is_running(label: str) -> bool:
+    """Return True if launchctl list shows a live PID for label."""
+    try:
+        r = subprocess.run(["launchctl", "list"],
+                           capture_output=True, text=True, timeout=5)
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == label:
+                return parts[0].isdigit()
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_launchd_active(label: str) -> bool:
+    deadline = time.time() + SUDS_STARTUP_TIMEOUT_S
+    while time.time() < deadline:
+        if _launchd_is_running(label):
+            return True
+        time.sleep(SUDS_STARTUP_POLL_S)
+    return False
+
+
+def _prune_suds_backups_darwin(exec_dir: str) -> None:
+    """Delete old .bak.* files in exec_dir (no sudo: user owns the dir)."""
+    import re as _re
+    bak_pat = _re.compile(r'^(.+?)\.bak\.(\d{8}-\d{6})$')
+    try:
+        by_base: dict[str, list[str]] = {}
+        for name in os.listdir(exec_dir):
+            m = bak_pat.match(name)
+            if m:
+                by_base.setdefault(m.group(1), []).append(name)
+        for _base, baks in by_base.items():
+            baks.sort(reverse=True)
+            for old in baks[SUDS_BACKUP_KEEP:]:
+                full = os.path.join(exec_dir, old)
+                try:
+                    os.unlink(full)
+                    print(f"[suds] prune: removed {old}")
+                except OSError as e:
+                    print(f"[suds] prune: could not remove {old}: {e}")
+    except OSError as e:
+        print(f"[suds] prune: could not list {exec_dir}: {e}")
+
+
+def _perform_rollback_darwin(status_fn, label: str,
+                              backup_paths: list[tuple[str, str]],
+                              reason: str, prior_version: str = "") -> bool:
+    """Restore backups and restart via launchctl. Returns True on success."""
+    status_fn("rolling_back", error=reason)
+    try:
+        _launchd_stop(label)
+        for cur, bak in backup_paths:
+            shutil.copy2(bak, cur)
+            os.chmod(cur, 0o755)
+        ok, err = _launchd_start(label)
+        if not ok:
+            raise RuntimeError(f"post-restore start failed: {err}")
+        if not _wait_for_launchd_active(label):
+            raise RuntimeError(f"unit did not come back active within {SUDS_STARTUP_TIMEOUT_S}s")
+    except Exception as e:
+        status_fn("rolled_back_failed",
+                  error=f"original failure: {reason}; rollback also failed: {e}")
+        return False
+    if backup_paths:
+        _prune_suds_backups_darwin(os.path.dirname(backup_paths[0][0]))
+    status_fn("rolled_back_ok", error=reason, prior_version=prior_version)
+    return True
+
+
+def _execute_upgrade_command_darwin(cmd: dict, dashboard_url: str, token: str,
+                                    rpc_timeout: float) -> None:
+    """Full SUDS upgrade on macOS: launchctl stop/start, no sudo, user-owned binaries."""
+    cid = cmd["id"]
+    pubkey = cmd["pubkey"]
+    target_version = cmd["target_version"]
+    asset_url = cmd["asset_url"]
+
+    def status(s: str, **kw) -> None:
+        post_upgrade_status(dashboard_url, token, cid, s, **kw)
+
+    target = _resolve_upgrade_target_darwin(pubkey, rpc_timeout)
+    if not target:
+        status("failed", error=f"no upgrade target for pubkey {pubkey[:12]}…")
+        return
+    label, exec_dir = target
+    binary_path = os.path.join(exec_dir, "xeqm-d")
+    prior_version = _xeqm_d_version(binary_path) or ""
+    print(f"[suds] darwin upgrade {cid}: label={label} exec_dir={exec_dir} prior={prior_version}")
+
+    status("downloading", message=f"label={label}", prior_version=prior_version)
+    work_root = f"/tmp/xeqm-suds-{cid}"
+    tarball = work_root + os.path.splitext(asset_url)[1]
+    extracted = None
+    try:
+        if os.path.exists(work_root):
+            shutil.rmtree(work_root)
+        _download_tarball(asset_url, tarball)
+        extracted = _extract_tarball(tarball, work_root)
+    except Exception as e:
+        shutil.rmtree(work_root, ignore_errors=True)
+        status("failed", error=f"download/extract failed: {e}")
+        return
+
+    missing = [b for b in SUDS_BINARIES if not os.path.isfile(os.path.join(extracted, b))]
+    if missing:
+        shutil.rmtree(work_root, ignore_errors=True)
+        status("failed", error=f"release tarball missing binaries: {', '.join(missing)}")
+        return
+
+    ts_str = time.strftime("%Y%m%d-%H%M%S")
+    backup_paths: list[tuple[str, str]] = []
+    try:
+        for b in SUDS_BINARIES:
+            cur = os.path.join(exec_dir, b)
+            if not os.path.isfile(cur):
+                continue
+            bak = f"{cur}.bak.{ts_str}"
+            shutil.copy2(cur, bak)
+            backup_paths.append((cur, bak))
+    except Exception as e:
+        shutil.rmtree(work_root, ignore_errors=True)
+        status("failed", error=f"backup failed: {e}", prior_version=prior_version)
+        return
+    if not any(os.path.basename(c) == "xeqm-d" for c, _ in backup_paths):
+        shutil.rmtree(work_root, ignore_errors=True)
+        status("failed", error=f"no xeqm-d found in {exec_dir}", prior_version=prior_version)
+        return
+
+    status("staging", message=f"backups *.bak.{ts_str}", prior_version=prior_version,
+           backup_path=ts_str)
+
+    status("restarting")
+    rollback_reason: str | None = None
+    try:
+        ok, err = _launchd_stop(label)
+        if not ok:
+            raise RuntimeError(f"stop failed: {err}")
+        for b in SUDS_BINARIES:
+            src = os.path.join(extracted, b)
+            dst = os.path.join(exec_dir, b)
+            if not os.path.isfile(src):
+                continue
+            shutil.copy2(src, dst)
+            os.chmod(dst, 0o755)
+        ok, err = _launchd_start(label)
+        if not ok:
+            raise RuntimeError(f"start failed: {err}")
+    except Exception as e:
+        rollback_reason = str(e)
+
+    if rollback_reason is None and not _wait_for_launchd_active(label):
+        rollback_reason = f"daemon did not start within {SUDS_STARTUP_TIMEOUT_S}s"
+
+    if rollback_reason is None:
+        status("verifying")
+        seen_version = _xeqm_d_version(binary_path) or ""
+        target_v = _parse_semver(target_version)
+        seen_v = _parse_semver(seen_version)
+        if not (target_v and seen_v and seen_v >= target_v):
+            rollback_reason = f"version mismatch: expected '{target_version}', got '{seen_version}'"
+        elif seen_version and seen_version == prior_version:
+            rollback_reason = (
+                f"binary unchanged after install: still '{seen_version}' "
+                f"(tarball may contain a different build of the same semver)"
+            )
+
+    if rollback_reason is None:
+        shutil.rmtree(work_root, ignore_errors=True)
+        _prune_suds_backups_darwin(exec_dir)
+        status("observing",
+               message=f"label {label} on {target_version}; awaiting dashboard observation",
+               prior_version=prior_version, backup_path=ts_str)
+        return
+
+    _perform_rollback_darwin(status, label, backup_paths, rollback_reason,
+                              prior_version=prior_version)
+    shutil.rmtree(work_root, ignore_errors=True)
+
+
+# ── SUDS Phase 2: native-systemd/launchd upgrade executor ─────────────────────
+
 def execute_upgrade_command(cmd: dict, dashboard_url: str, token: str,
                             systemd_pattern: str, systemd_unit_dir: str,
                             rpc_timeout: float = 5.0) -> None:
@@ -1708,6 +1951,10 @@ def execute_upgrade_command(cmd: dict, dashboard_url: str, token: str,
 
     if pubkey.startswith(COMPANION_PUBKEY_SENTINEL + ":"):
         _execute_companion_upgrade(cmd, dashboard_url, token)
+        return
+
+    if sys.platform == "darwin":
+        _execute_upgrade_command_darwin(cmd, dashboard_url, token, rpc_timeout)
         return
 
     def status(s: str, **kw) -> None:
@@ -1916,14 +2163,35 @@ def execute_rollback_command(cmd: dict, dashboard_url: str, token: str,
                error="rollback requested but no backup_path on command — manual fix required")
         return
 
+    reason = cmd.get("error") or "dashboard requested rollback"
+
+    if sys.platform == "darwin":
+        target_d = _resolve_upgrade_target_darwin(pubkey, rpc_timeout)
+        if not target_d:
+            status("rolled_back_failed", error=f"could not locate target for pubkey {pubkey[:12]}…")
+            return
+        label, exec_dir_d = target_d
+        backup_paths_d = []
+        for b in SUDS_BINARIES:
+            cur = os.path.join(exec_dir_d, b)
+            bak = f"{cur}.bak.{backup_ts}"
+            if not os.path.isfile(bak):
+                if b == "xeqm-d":
+                    status("rolled_back_failed",
+                           error=f"backup file missing: {bak} — manual restore required")
+                    return
+                continue
+            backup_paths_d.append((cur, bak))
+        _perform_rollback_darwin(status, label, backup_paths_d, reason,
+                                  prior_version=cmd.get("prior_version") or "")
+        return
+
     target = _resolve_upgrade_target(
         pubkey, systemd_pattern, systemd_unit_dir, rpc_timeout,
     )
     if not target:
         status("rolled_back_failed", error=f"could not locate target for pubkey {pubkey[:12]}…")
         return
-
-    reason = cmd.get("error") or "dashboard requested rollback"
 
     _, unit_name, exec_dir = target
     # Hosts can have a subset of SUDS_BINARIES installed; the upgrade
