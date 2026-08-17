@@ -692,6 +692,7 @@ install_manager() {
       "${config[daemon_log_level]:-}"
 
     svc_reload_daemon
+    clear_port_if_stale "${node_config[p2p_bind_port]}"
     svc_enable "${snode_name}"
     svc_start "${snode_name}"
 

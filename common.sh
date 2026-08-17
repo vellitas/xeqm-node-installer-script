@@ -531,6 +531,22 @@ svc_label() {
 
 svc_plist_path() { echo "${XEQM_SVC_DIR}/$(svc_label "${1}").plist"; }
 
+clear_port_if_stale() {
+  local port="$1"
+  local pids
+  pids="$(lsof -ti ":${port}" 2>/dev/null || true)"
+  if [[ -n "${pids}" ]]; then
+    echo -e "  Port ${port} is held by stale process(es) — clearing..."
+    # shellcheck disable=SC2086
+    kill ${pids} 2>/dev/null || true
+    sleep 2
+    pids="$(lsof -ti ":${port}" 2>/dev/null || true)"
+    # shellcheck disable=SC2086
+    [[ -n "${pids}" ]] && kill -9 ${pids} 2>/dev/null || true
+    sleep 1
+  fi
+}
+
 svc_start() {
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
     launchctl start "$(svc_label "${1}")"
