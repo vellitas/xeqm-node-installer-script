@@ -5,7 +5,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-: "${script_basedir:=$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")}"
+: "${script_basedir:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}"
 
 source "${script_basedir}/common.sh"
 

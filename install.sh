@@ -15,7 +15,7 @@ if [[ -z "${BASH_SOURCE[0]:-}" || "${BASH_SOURCE[0]}" == "bash" || "${BASH_SOURC
   exec bash "${_INSTALL_DIR}/install.sh" "$@"
 fi
 
-: "${script_basedir:=$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")}"
+: "${script_basedir:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}"
 
 source "${script_basedir}/common.sh"
 source "${script_basedir}/discovery.sh"

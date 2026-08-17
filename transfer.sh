@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-script_basedir=$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")
+script_basedir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly script_basedir
 
 source "${script_basedir}/common.sh"

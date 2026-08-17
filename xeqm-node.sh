@@ -6,7 +6,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-script_basedir=$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")
+script_basedir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 install_root_bin_dir=$HOME
 install_root_service='/etc/systemd/system'
 readonly script_basedir install_root_bin_dir install_root_service

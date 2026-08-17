@@ -8,7 +8,7 @@ set -o pipefail
 upgrade_session_token="$(printf '%08x' $RANDOM)"
 readonly upgrade_session_token
 
-: "${script_basedir:=$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")}"
+: "${script_basedir:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}"
 
 source "${script_basedir}/common.sh"
 source "${script_basedir}/discovery.sh"
