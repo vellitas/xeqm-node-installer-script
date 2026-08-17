@@ -109,11 +109,11 @@ _parse_etime() {
   [[ -z "${et}" ]] && echo "—" && return
   local days=0 hours=0 mins=0
   if   [[ "${et}" =~ ^([0-9]+)-([0-9]+):([0-9]+):([0-9]+)$ ]]; then
-    days="${BASH_REMATCH[1]}"; hours="${BASH_REMATCH[2]}"; mins="${BASH_REMATCH[3]}"
+    days=$(( 10#${BASH_REMATCH[1]} )); hours=$(( 10#${BASH_REMATCH[2]} )); mins=$(( 10#${BASH_REMATCH[3]} ))
   elif [[ "${et}" =~ ^([0-9]+):([0-9]+):([0-9]+)$ ]]; then
-    hours="${BASH_REMATCH[1]}"; mins="${BASH_REMATCH[2]}"
+    hours=$(( 10#${BASH_REMATCH[1]} )); mins=$(( 10#${BASH_REMATCH[2]} ))
   elif [[ "${et}" =~ ^([0-9]+):([0-9]+)$ ]]; then
-    mins="${BASH_REMATCH[1]}"
+    mins=$(( 10#${BASH_REMATCH[1]} ))
   fi
   if   [[ "${days}"  -gt 0 ]]; then printf "%dd %dh" "${days}"  "${hours}"
   elif [[ "${hours}" -gt 0 ]]; then printf "%dh %dm" "${hours}" "${mins}"
