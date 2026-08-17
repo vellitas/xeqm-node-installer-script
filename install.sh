@@ -1028,14 +1028,15 @@ watch_daemon_status() {
 
 install_agent() {
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
-    echo -e "\n  Agent installation is not supported on macOS — skipping."
-    echo -e "  To connect this node to the operator dashboard, install the agent on a Linux host."
-    return 0
-  fi
-
-  if systemctl is-enabled --quiet xeqm-agent.timer 2>/dev/null; then
-    echo -e "\n  XEQM agent already installed and enabled — skipping."
-    return 0
+    if [[ -f "${HOME}/Library/LaunchAgents/com.xeqmlabs.agent.plist" ]]; then
+      echo -e "\n  XEQM agent already installed — skipping."
+      return 0
+    fi
+  else
+    if systemctl is-enabled --quiet xeqm-agent.timer 2>/dev/null; then
+      echo -e "\n  XEQM agent already installed and enabled — skipping."
+      return 0
+    fi
   fi
 
   local _dashboard_url="${config[agent_url]:-}"
@@ -1088,6 +1089,81 @@ install_agent() {
   fi
 
   echo -e "\n\033[1mInstalling XEQM Operator Dashboard Agent...\033[0m"
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    local _mac_agent_dir="${HOME}/xeqm-agent"
+    local _mac_plist="${HOME}/Library/LaunchAgents/com.xeqmlabs.agent.plist"
+
+    if ! python3 -c "import psutil" 2>/dev/null; then
+      echo -e "  Installing psutil..."
+      pip3 install --quiet psutil
+    fi
+
+    mkdir -p "${_mac_agent_dir}"
+
+    local _agent_installed=0
+    if [[ -n "${_dashboard_url}" ]]; then
+      echo -e "  Fetching agent from dashboard..."
+      if curl -fsSL --max-time 15 \
+          -o "${_mac_agent_dir}/xeqm_agent.py" \
+          "${_dashboard_url}/agent.py" 2>/dev/null; then
+        _agent_installed=1
+        echo -e "  Fetched: ${_dashboard_url}/agent.py"
+      else
+        echo -e "  \033[0;33m[WARN]\033[0m Could not reach dashboard — using bundled agent"
+      fi
+    fi
+    if [[ "${_agent_installed}" -eq 0 ]]; then
+      cp "${script_basedir}/xeqm_agent.py" "${_mac_agent_dir}/xeqm_agent.py"
+      echo -e "  Installed: bundled xeqm_agent.py"
+    fi
+    chmod 755 "${_mac_agent_dir}/xeqm_agent.py"
+
+    cat > "${_mac_agent_dir}/xeqm-agent.conf" <<AGENTCONF
+[agent]
+url   = ${_dashboard_url}
+token = ${_agent_token}
+AGENTCONF
+    chmod 600 "${_mac_agent_dir}/xeqm-agent.conf"
+    echo -e "  Wrote: ${_mac_agent_dir}/xeqm-agent.conf"
+
+    mkdir -p "${HOME}/Library/LaunchAgents"
+    cat > "${_mac_plist}" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.xeqmlabs.agent</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>${_mac_agent_dir}/xeqm_agent.py</string>
+	</array>
+	<key>StartInterval</key>
+	<integer>60</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>${_mac_agent_dir}/xeqm-agent.log</string>
+	<key>StandardErrorPath</key>
+	<string>${_mac_agent_dir}/xeqm-agent.log</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+	</dict>
+</dict>
+</plist>
+PLISTEOF
+
+    launchctl load "${_mac_plist}"
+    echo -e "  Loaded: com.xeqmlabs.agent (reporting every 60s)"
+
+    echo -e "\n  \033[1;32m[DONE]\033[0m Agent installed and reporting to ${_dashboard_url}"
+    config[agent_installed]=1
+    return 0
+  fi
 
   if ! command -v python3 >/dev/null 2>&1; then
     sudo apt -y install python3

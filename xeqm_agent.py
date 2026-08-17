@@ -52,7 +52,11 @@ AGENT_API_VERSION = "v1"   # path prefix the agent posts under (/api/v1/agent/*)
 
 DEFAULT_RPC_PORT = 9231
 DEFAULT_INTERVAL = 60
-_CONF_PATHS = ["/etc/xeqm-agent.conf", os.path.expanduser("~/.xeqm-agent.conf")]
+_CONF_PATHS = [
+    "/etc/xeqm-agent.conf",
+    os.path.expanduser("~/.xeqm-agent.conf"),
+    os.path.expanduser("~/xeqm-agent/xeqm-agent.conf"),
+]
 
 # Identify as XEQM-Agent rather than the default "Python-urllib" UA: Cloudflare's
 # Browser Integrity Check (error 1010) bans that signature, which blocks reports to a
@@ -580,6 +584,58 @@ def discover_systemd_units(
     return out
 
 
+def discover_launchd_units(
+    plist_dir: str | None = None,
+    pattern: str = "com.xeqmlabs.snode*.plist",
+) -> list[tuple[str, str]]:
+    """Return [(label, rpc_url), ...] by parsing LaunchAgent plists on macOS.
+
+    Reads ProgramArguments from each matching plist to extract --rpc-admin port.
+    Label is the plist filename without .plist (e.g. 'com.xeqmlabs.snode1').
+    """
+    import fnmatch
+    import xml.etree.ElementTree as ET
+    if plist_dir is None:
+        plist_dir = os.path.expanduser("~/Library/LaunchAgents")
+    out: list[tuple[str, str]] = []
+    try:
+        names = sorted(os.listdir(plist_dir))
+    except OSError:
+        return out
+    for fname in names:
+        if not fnmatch.fnmatch(fname, pattern):
+            continue
+        path = os.path.join(plist_dir, fname)
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError:
+            continue
+        root = tree.getroot()
+        top_dict = root.find("dict")
+        if top_dict is None:
+            continue
+        children = list(top_dict)
+        prog_args: list[str] = []
+        for i, child in enumerate(children):
+            if child.tag == "key" and child.text == "ProgramArguments":
+                if i + 1 < len(children) and children[i + 1].tag == "array":
+                    prog_args = [s.text or "" for s in children[i + 1].findall("string")]
+                break
+        url: str | None = None
+        for arg in prog_args:
+            m = re.search(r"--rpc-admin[= ]\S*:(\d+)", arg)
+            if not m:
+                m = re.search(r"--rpc-bind-port[= ](\d+)", arg)
+            if m:
+                url = f"http://127.0.0.1:{m.group(1)}"
+                break
+        if url is None:
+            continue
+        label = fname[:-6] if fname.endswith(".plist") else fname
+        out.append((label, url))
+    return out
+
+
 # ── Payload assembly ───────────────────────────────────────────────────────────
 
 def build_payload(rpc_urls: list[str],
@@ -589,11 +645,12 @@ def build_payload(rpc_urls: list[str],
     metrics = collect_host_metrics()
     containers: list[dict] = []
 
-    # systemd-discovered units carry both a name AND a URL so the
-    # dashboard can attribute each pubkey to its specific unit. Returns
-    # [(unit_name, rpc_url), ...]. Empty on hosts without matching
-    # units (seeds, pn-*); the caller's explicit rpc_urls cover those.
-    systemd_units = discover_systemd_units(systemd_pattern, systemd_unit_dir)
+    # Discover local snode units: systemd on Linux, launchd on macOS.
+    # Returns [(unit_name_or_label, rpc_url), ...].
+    if sys.platform == "darwin":
+        systemd_units = discover_launchd_units()
+    else:
+        systemd_units = discover_systemd_units(systemd_pattern, systemd_unit_dir)
     url_to_unit = {url: name for name, url in systemd_units}
     rpc_urls = list(rpc_urls) + [url for _name, url in systemd_units]
 
@@ -704,8 +761,8 @@ def build_payload(rpc_urls: list[str],
         containers.append({
             "name": unit_name,
             "pubkey": pk,
-            "status": "active",  # systemd lists it; the dashboard treats this as the unit-running signal
-            "image": "systemd",
+            "status": "active",
+            "image": "launchd" if sys.platform == "darwin" else "systemd",
         })
         units_with_pubkeys.append((unit_name, pk))
 
@@ -1050,6 +1107,37 @@ def capture_daemon_state(unit: str) -> str | None:
     return path
 
 
+def _execute_restart_command_darwin(cmd: dict, dashboard_url: str, token: str) -> None:
+    """macOS variant: cycle a snode LaunchAgent label via launchctl stop/start."""
+    import re as _re
+    label = cmd.get("unit") or ""
+    cid = cmd["id"]
+    if not _re.fullmatch(r"com\.xeqmlabs\.[A-Za-z0-9_-]+", label):
+        post_restart_result(
+            dashboard_url, token, cid, "failed",
+            error=f"refusing to restart unsafe launchd label: {label!r}",
+        )
+        return
+    try:
+        r = subprocess.run(["launchctl", "stop", label],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            post_restart_result(dashboard_url, token, cid, "failed",
+                                error=f"launchctl stop failed: {(r.stderr or '').strip()}")
+            return
+        time.sleep(2)
+        r = subprocess.run(["launchctl", "start", label],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            post_restart_result(dashboard_url, token, cid, "failed",
+                                error=f"launchctl start failed: {(r.stderr or '').strip()}")
+            return
+        post_restart_result(dashboard_url, token, cid, "ok")
+    except Exception as e:
+        post_restart_result(dashboard_url, token, cid, "failed",
+                            error=f"restart failed: {e}")
+
+
 def execute_restart_command(cmd: dict, dashboard_url: str, token: str) -> None:
     """Cycle a snode unit for a watchdog-queued remote restart, then POST
     the outcome back. Validates the unit name to prevent command
@@ -1064,6 +1152,10 @@ def execute_restart_command(cmd: dict, dashboard_url: str, token: str) -> None:
     the policy as-is. The 2-second settle gives the daemon time to
     release the p2p/RPC/quorumnet ports before we re-bind.
     """
+    if sys.platform == "darwin":
+        _execute_restart_command_darwin(cmd, dashboard_url, token)
+        return
+
     import re as _re
     unit = cmd.get("unit") or ""
     cid = cmd["id"]
