@@ -85,6 +85,8 @@ wipe_canonical_node() {
 discover_snode_users() {
   local -n _dsu_result="$1"
   _dsu_result=()
+  # macOS has no per-snode system users — nodes run as the current user
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
   local u
   while IFS= read -r u; do
     _dsu_result+=("${u}")
