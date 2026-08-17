@@ -957,15 +957,17 @@ watch_daemon_status() {
         fi
       elif [[ "${height}" =~ ^[0-9]+$ && "${height}" -gt 0 ]]; then
         # RPC responding with a height and target_height=0 (or < 1000 blocks behind).
-        # target_height=0 is how xeqm-d signals "I am at tip". After 2 consecutive
-        # stable checks, declare synced — avoids false-positive on initial load.
+        # target_height=0 is how xeqm-d signals "I am at tip". Require 6 consecutive
+        # stable checks (60s) to avoid declaring synced before peers are found — a
+        # fresh daemon with no peers reports target_height=0 at whatever height the
+        # LMDB loaded to, which may be far below the actual network tip.
         if [[ "${height}" -eq "${last_height}" ]]; then
           _synced_checks=$(( _synced_checks + 1 ))
         else
           _synced_checks=0
           last_height="${height}"
         fi
-        if [[ "${_synced_checks}" -ge 2 ]]; then
+        if [[ "${_synced_checks}" -ge 6 ]]; then
           printf "\r  \033[1;32m✓ Blockchain synchronized\033[0m  (height=%d, %s elapsed)%-20s\n" \
             "${height}" "$(_watch_elapsed "${start_time}")" ""
           break
