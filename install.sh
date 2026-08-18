@@ -1359,12 +1359,13 @@ next_steps() {
     fi
   fi
 
-  # Public dashboard reminder — shown when this host also runs a seed or pubnode
+  # Public dashboard reminder — shown only on named fleet seed/pubnode hosts (seed-N, pn-N)
   if [[ "${OS_TYPE}" != "Darwin" ]]; then
-    local _fleet_role=""
+    local _fleet_role="" _hn
+    _hn="$(hostname -s 2>/dev/null || true)"
     systemctl is-active xeqm-seed.service    &>/dev/null && _fleet_role="seed"
     systemctl is-active xeqm-pubnode.service &>/dev/null && _fleet_role="pubnode"
-    if [[ -n "${_fleet_role}" ]]; then
+    if [[ -n "${_fleet_role}" ]] && [[ "${_hn}" =~ ^(seed|pn)-[0-9]+$ ]]; then
       echo -e "\n\033[1m  [!]  Add this host to the public dashboard fleet\033[0m"
       echo -e "\n       This server runs \033[1mxeqm-${_fleet_role}.service\033[0m and should appear on"
       echo -e "       dashboard.xeqmlabs.com. Run on missoula:\n"
