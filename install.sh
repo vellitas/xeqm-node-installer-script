@@ -1359,6 +1359,20 @@ next_steps() {
     fi
   fi
 
+  # Public dashboard reminder — shown when this host also runs a seed or pubnode
+  if [[ "${OS_TYPE}" != "Darwin" ]]; then
+    local _fleet_role=""
+    systemctl is-active xeqm-seed.service    &>/dev/null && _fleet_role="seed"
+    systemctl is-active xeqm-pubnode.service &>/dev/null && _fleet_role="pubnode"
+    if [[ -n "${_fleet_role}" ]]; then
+      echo -e "\n\033[1m  [!]  Add this host to the public dashboard fleet\033[0m"
+      echo -e "\n       This server runs \033[1mxeqm-${_fleet_role}.service\033[0m and should appear on"
+      echo -e "       dashboard.xeqmlabs.com. Run on missoula:\n"
+      echo -e "       \033[1mPUBLISHER_TOKEN=<token> bash /opt/xeqm-public-dashboard/deploy-publisher.sh\033[0m\n"
+      echo -e "       Then add the hostname to FLEET_NODES in /opt/xeqm-public-dashboard/app.py\n"
+    fi
+  fi
+
   # External firewall table — all installed nodes
   if [[ "${config[firewall_mode]:-}" = "external" || "${config[firewall_mode]:-}" = "oci" ]]; then
     local -a entries=()
