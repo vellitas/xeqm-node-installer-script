@@ -814,7 +814,7 @@ compile_binary_to_opt() {
       exit 1
     fi
     echo -e "  Installing build dependencies via Homebrew..."
-    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config 2>/dev/null || true
+    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config gmp unbound 2>/dev/null || true
     local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
     local _expat_root; _expat_root="$(brew --prefix expat)"
     local _cmake_extra="-DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
