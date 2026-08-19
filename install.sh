@@ -1611,17 +1611,64 @@ wz_detect() {
   done
   _sum+="\nXEQM version:  ${config[install_version]}\n"
   _sum+="\nAll ports confirmed free on this server.\n"
-  _sum+="\nQuorumnet requires both TCP + UDP open on your firewall.\n"
-  _sum+="To use custom ports, press Back and cancel out, then run:\n"
-  _sum+="  sudo bash install.sh --ports p2p:9230+9330,rpc:9231+9331"
+  _sum+="\nQuorumnet requires both TCP + UDP open on your firewall."
 
-  local _detect_ht=$(( config[nodes] + 16 ))
-  [[ "${_detect_ht}" -lt 20 ]] && _detect_ht=20
-  [[ "${_detect_ht}" -gt 36 ]] && _detect_ht=36
-  wt_scrolltext "Auto-Detected Configuration" "${_sum}" "${_detect_ht}" 72
-  local _rc=$?
-  [[ ${_rc} -ne 0 ]] && return 1
-  return 0
+  local _detect_ht=$(( config[nodes] + 14 ))
+  [[ "${_detect_ht}" -lt 18 ]] && _detect_ht=18
+  [[ "${_detect_ht}" -gt 34 ]] && _detect_ht=34
+
+  while true; do
+    wt_yesno "Auto-Detected Configuration" "${_sum}" "${_detect_ht}" 72 "Proceed" "Customize Ports"
+    local _rc=$?
+    if [[ ${_rc} -eq 0 ]]; then
+      return 0  # Proceed with auto-detected ports
+    elif [[ ${_rc} -eq 255 ]]; then
+      return 1  # Esc = Back to previous step
+    fi
+
+    # "Customize Ports" selected — edit p2p port per node (rpc=p2p+1, qnet=p2p+2)
+    local _cust_ok=1
+    local _i=1
+    while [[ ${_i} -le ${config[nodes]} ]]; do
+      local _cur="${config["snode${_i}__p2p_bind_port"]}"
+      local _new_p2p
+      while true; do
+        wt_inputbox "Custom Ports — Node ${_i} of ${config[nodes]}" \
+          "P2P port for node ${_i}.\n\nRPC and Quorumnet are auto-set to P2P+1 and P2P+2.\nCurrent: ${_cur}" \
+          10 60 _new_p2p "${_cur}"
+        local _irc=$?
+        if [[ ${_irc} -ne 0 ]]; then _cust_ok=0; break 2; fi
+        if [[ "${_new_p2p}" =~ ^[0-9]+$ && "${_new_p2p}" -ge 1024 && "${_new_p2p}" -le 65533 ]]; then
+          config["snode${_i}__p2p_bind_port"]="${_new_p2p}"
+          config["snode${_i}__rpc_bind_port"]="$(( _new_p2p + 1 ))"
+          config["snode${_i}__quorumnet_port"]="$(( _new_p2p + 2 ))"
+          break
+        fi
+        wt_msgbox "Invalid Port" "Enter a number between 1024 and 65533." 8 48
+      done
+      _i=$((_i + 1))
+    done
+
+    [[ ${_cust_ok} -eq 0 ]] && continue  # user backed out of port editor — re-show summary
+
+    # Rebuild summary with updated ports
+    _sum="Auto-detected configuration for ${config[nodes]} node(s):\n\n"
+    _sum+="$(printf "%-5s %-14s %-7s %-7s %-10s\n" "Node" "Snode" "P2P" "RPC" "Quorumnet")\n"
+    _sum+="$(printf "%-5s %-14s %-7s %-7s %-10s\n" "────" "──────────────" "──────" "──────" "─────────")\n"
+    local _j=1
+    while [[ ${_j} -le ${config[nodes]} ]]; do
+      _sum+="$(printf "%-5s %-14s %-7s %-7s %s\n" \
+        "${_j}" \
+        "snode$(( _start_slot + _j - 1 ))" \
+        "${config["snode${_j}__p2p_bind_port"]}" \
+        "${config["snode${_j}__rpc_bind_port"]}" \
+        "${config["snode${_j}__quorumnet_port"]}")\n"
+      _j=$((_j + 1))
+    done
+    _sum+="\nXEQM version:  ${config[install_version]}\n"
+    _sum+="\nAll ports confirmed free on this server.\n"
+    _sum+="\nQuorumnet requires both TCP + UDP open on your firewall."
+  done
 }
 
 wz_agent() {
