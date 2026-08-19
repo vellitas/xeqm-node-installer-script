@@ -36,7 +36,11 @@ source "${script_basedir}/common.sh"
 
 if ! command -v whiptail >/dev/null 2>&1; then
   echo "  Installing whiptail..."
-  sudo apt-get -y -q install whiptail
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    brew install newt
+  else
+    sudo apt-get -y -q install whiptail
+  fi
 fi
 
 if ! [ -t 0 ] || ! [ -t 1 ]; then
