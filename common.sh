@@ -814,25 +814,15 @@ compile_binary_to_opt() {
       exit 1
     fi
     echo -e "  Installing build dependencies via Homebrew..."
-    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config gmp unbound 2>/dev/null || true
+    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config gmp unbound binutils 2>/dev/null || true
     local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
     local _expat_root; _expat_root="$(brew --prefix expat)"
-    # macOS BSD ar fails on archive member names > 15 chars (e.g. curlmultiholder.cpp.o).
-    # CMAKE_USER_MAKE_RULES_OVERRIDE is loaded AFTER CMake's platform detection modules
-    # (which reset CMAKE_CXX_ARCHIVE_CREATE via normal variables, shadowing any cache
-    # values set with -C).  Using the override file is the only reliable way to win.
-    local _mac_rules="${build_dir}/mac_rules.cmake"
-    mkdir -p "${build_dir}"
-    cat > "${_mac_rules}" << 'MACRULES'
-if(APPLE)
-  set(CMAKE_AR /usr/bin/libtool)
-  set(CMAKE_C_ARCHIVE_CREATE   "<CMAKE_AR> -static <LINK_FLAGS> -o <TARGET> <OBJECTS>")
-  set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> -static <LINK_FLAGS> -o <TARGET> <OBJECTS>")
-  set(CMAKE_C_ARCHIVE_FINISH   "true")
-  set(CMAKE_CXX_ARCHIVE_FINISH "true")
-endif()
-MACRULES
-    local _cmake_extra="-DCMAKE_USER_MAKE_RULES_OVERRIDE=${_mac_rules} -DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    # macOS BSD ar rejects archive member names > 15 chars (e.g. curlmultiholder.cpp.o).
+    # GNU gar (binutils) handles any name length; ld64 can read SYSV archives.
+    # Passing CMAKE_AR/CMAKE_RANLIB as -D flags bypasses platform-module override issues.
+    local _gar; _gar="$(brew --prefix binutils)/bin/gar"
+    local _granlib; _granlib="$(brew --prefix binutils)/bin/granlib"
+    local _cmake_extra="-DCMAKE_AR=${_gar} -DCMAKE_RANLIB=${_granlib} -DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
     local _nproc; _nproc="$(sysctl -n hw.logicalcpu)"
   else
     sudo apt-get -y install build-essential cmake pkg-config libboost-all-dev libssl-dev \
@@ -844,6 +834,7 @@ MACRULES
   fi
 
   mkdir -p "${build_dir}"
+  local _build_log="${build_dir}/build.log"
   local built_bin=""
   built_bin="$(
     set -euo pipefail
@@ -854,9 +845,17 @@ MACRULES
     git checkout "${config[install_version]}"
     mkdir -p build && cd build
     cmake -DCMAKE_BUILD_TYPE=Release ${_cmake_extra} ..
-    make -j"${_nproc}" daemon
+    make -j"${_nproc}" daemon 2>&1 | tee "${_build_log}" >&2
     find "${build_dir}" -name "xeqm-d" -type f | head -1
-  )" || { rm -rf "${build_dir}"; echo -e "\033[0;31merror\033[0m: compile failed." >&2; exit 1; }
+  )" || {
+    echo -e "\033[0;31merror\033[0m: compile failed." >&2
+    if [[ -f "${_build_log}" ]]; then
+      echo "--- build log (last 60 lines) ---" >&2
+      tail -60 "${_build_log}" >&2
+    fi
+    rm -rf "${build_dir}"
+    exit 1
+  }
 
   rm -rf "${build_dir}"
   if [[ -z "${built_bin}" ]]; then
