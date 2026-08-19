@@ -1,6 +1,26 @@
 #!/usr/bin/env bash
 # XEQM Node Manager — main menu
 
+# Bash 4+ required for associative arrays. macOS ships bash 3.2; re-exec with
+# a Homebrew-installed bash if available, otherwise print a clear install hint.
+if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
+  for _b in /usr/local/bin/bash /opt/homebrew/bin/bash; do
+    if [[ -x "${_b}" ]]; then
+      exec "${_b}" "$0" "$@"
+    fi
+  done
+  echo ""
+  echo "  ERROR: bash 4+ is required (this system has bash ${BASH_VERSION})."
+  echo ""
+  echo "  Install a modern bash via Homebrew:"
+  echo "    /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+  echo "    brew install bash"
+  echo ""
+  echo "  Then re-run:  bash xeqm-manager.sh"
+  echo ""
+  exit 1
+fi
+
 set -o errexit
 set -o nounset
 set -o pipefail
