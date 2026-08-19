@@ -817,7 +817,19 @@ compile_binary_to_opt() {
     brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config gmp unbound 2>/dev/null || true
     local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
     local _expat_root; _expat_root="$(brew --prefix expat)"
-    local _cmake_extra="-DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    # macOS ar (BSD) fails on archive member names > 15 chars; use libtool instead.
+    # The archive-create rules contain spaces so they must go in a cmake init cache
+    # file — shell word-splitting would mangle them if passed as -D flags.
+    local _mac_cache="${build_dir}/mac_init.cmake"
+    mkdir -p "${build_dir}"
+    cat > "${_mac_cache}" << 'MACINIT'
+set(CMAKE_AR /usr/bin/libtool CACHE FILEPATH "")
+set(CMAKE_C_ARCHIVE_CREATE   "<CMAKE_AR> -static <LINK_FLAGS> -o <TARGET> <OBJECTS>" CACHE STRING "")
+set(CMAKE_CXX_ARCHIVE_CREATE "<CMAKE_AR> -static <LINK_FLAGS> -o <TARGET> <OBJECTS>" CACHE STRING "")
+set(CMAKE_C_ARCHIVE_FINISH   "true" CACHE STRING "")
+set(CMAKE_CXX_ARCHIVE_FINISH "true" CACHE STRING "")
+MACINIT
+    local _cmake_extra="-C ${_mac_cache} -DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
     local _nproc; _nproc="$(sysctl -n hw.logicalcpu)"
   else
     sudo apt-get -y install build-essential cmake pkg-config libboost-all-dev libssl-dev \
