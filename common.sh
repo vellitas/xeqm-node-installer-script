@@ -1211,7 +1211,7 @@ install_dependencies() {
         brew install --quiet "${_missing[@]}" <<< "y"
     fi
     # Add GNU tools to front of PATH immediately after install
-    local _hb="/opt/homebrew/opt"
+    local _hb; _hb="$(brew --prefix)/opt"
     [[ -d "${_hb}/grep/libexec/gnubin"      ]] && export PATH="${_hb}/grep/libexec/gnubin:${PATH}"
     [[ -d "${_hb}/gnu-getopt/bin"            ]] && export PATH="${_hb}/gnu-getopt/bin:${PATH}"
     return 0
