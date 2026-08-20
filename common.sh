@@ -860,6 +860,17 @@ compile_binary_to_opt() {
     cd xeqm-core
     git submodule init && git submodule update
     git checkout "${config[install_version]}"
+    # cmake 4.x rejects cmake_minimum_required < 3.5 in child cmake processes.
+    # libzmq is built as an ExternalProject_Add inside oxen-mq; that child cmake
+    # invocation doesn't inherit CMAKE_POLICY_VERSION_MINIMUM from the parent.
+    # Patch LocalLibzmq.cmake to pass the flag explicitly.
+    local _lzmq="external/oxen-mq/cmake/local-libzmq/LocalLibzmq.cmake"
+    if [[ -f "${_lzmq}" ]]; then
+      sed -i '' \
+        's/CMAKE_ARGS \${libzmq_compiler_args}/CMAKE_ARGS ${libzmq_compiler_args} -DCMAKE_POLICY_VERSION_MINIMUM=3.5/' \
+        "${_lzmq}" || true
+      echo "  patched LocalLibzmq.cmake for cmake 4.x" >&2
+    fi
     mkdir -p build && cd build
     cmake -DCMAKE_BUILD_TYPE=Release ${_cmake_extra} ..
     echo "  cmake AR: $(grep '^CMAKE_AR:' CMakeCache.txt | cut -d= -f2 || echo unknown)" >&2
