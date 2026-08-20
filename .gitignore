@@ -2,3 +2,6 @@
 .installsessionstate
 .claude/
 CLAUDE.md
+__pycache__/
+*.pyc
+*.log
