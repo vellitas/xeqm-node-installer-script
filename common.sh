@@ -818,22 +818,17 @@ compile_binary_to_opt() {
     # Match what Linux builds need (ldns=DNS seed lookup, xz=liblzma, protobuf=wallet).
     # BUILD_GUI_DEPS=OFF skips hidapi/libusb — not needed for service node daemon.
     brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium \
-      pkg-config gmp unbound binutils ldns xz protobuf 2>/dev/null || true
+      pkg-config gmp unbound ldns xz protobuf 2>/dev/null || true
     local _brew_prefix; _brew_prefix="$(brew --prefix)"
     local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
     local _expat_root; _expat_root="$(brew --prefix expat)"
     local _ldns_root;  _ldns_root="$(brew --prefix ldns)"
     local _zmq_root;   _zmq_root="$(brew --prefix zeromq)"
-    # macOS BSD ar rejects archive member names > 15 chars (e.g. curlmultiholder.cpp.o).
-    # GNU gar (binutils) handles any name length; ld64 can read SYSV archives.
-    local _gar; _gar="$(brew --prefix binutils)/bin/gar"
-    local _granlib; _granlib="$(brew --prefix binutils)/bin/granlib"
     # oxen-mq checks for system zeromq via pkg_check_modules before falling back
     # to building bundled libzmq from source (which fails the cmake 4.x version
     # check). Export PKG_CONFIG_PATH so cmake can find brew's zeromq 4.3+.
     export PKG_CONFIG_PATH="${_brew_prefix}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-    local _cmake_extra="-DCMAKE_AR=${_gar} -DCMAKE_RANLIB=${_granlib} \
-      -DBUILD_GUI_DEPS=OFF \
+    local _cmake_extra="-DBUILD_GUI_DEPS=OFF \
       -DOPENSSL_ROOT_DIR=${_ossl_root} \
       -DBOOST_ROOT=$(brew --prefix boost) \
       -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root};${_ldns_root};${_zmq_root} \
@@ -873,8 +868,6 @@ compile_binary_to_opt() {
     fi
     mkdir -p build && cd build
     cmake -DCMAKE_BUILD_TYPE=Release ${_cmake_extra} ..
-    echo "  cmake AR: $(grep '^CMAKE_AR:' CMakeCache.txt | cut -d= -f2 || echo unknown)" >&2
-    echo "  cmake RANLIB: $(grep '^CMAKE_RANLIB:' CMakeCache.txt | cut -d= -f2 || echo unknown)" >&2
     make -j"${_nproc}" daemon 2>&1 | tee "${_build_log}"
   ) || {
     echo -e "\033[0;31merror\033[0m: compile failed." >&2
