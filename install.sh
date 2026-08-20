@@ -229,12 +229,23 @@ validate_parsed_command_line_args() {
 _calculate_max_nodes() {
   local _total_ram_mb=$(( system_info[memory] / 1024 ))
   local _free_disk_mb=$(( system_info[free_space_var_lib] / 1024 ))
-  local _ncpu; _ncpu="$(nproc 2>/dev/null || echo 1)"
 
-  # Read current CPU MHz; fall back to 2000 if unavailable (e.g. macOS)
+  # nproc is Linux/GNU coreutils only; macOS uses sysctl
+  local _ncpu
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    _ncpu="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 1)"
+  else
+    _ncpu="$(nproc 2>/dev/null || echo 1)"
+  fi
+
+  # Read CPU MHz: macOS exposes it via sysctl (hw.cpufrequency in Hz); Linux via /proc/cpuinfo
   local _cpu_mhz=2000
   local _raw_mhz
-  _raw_mhz="$(grep -m1 'cpu MHz' /proc/cpuinfo 2>/dev/null | awk '{printf "%d", $4}' || true)"
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    _raw_mhz="$(sysctl -n hw.cpufrequency 2>/dev/null | awk '{printf "%d", $1/1000000}' || true)"
+  else
+    _raw_mhz="$(grep -m1 'cpu MHz' /proc/cpuinfo 2>/dev/null | awk '{printf "%d", $4}' || true)"
+  fi
   [[ "${_raw_mhz}" =~ ^[0-9]+$ && "${_raw_mhz}" -gt 0 ]] && _cpu_mhz="${_raw_mhz}"
   local _ghz_cores=$(( _ncpu * _cpu_mhz / 1000 ))
   [[ "${_ghz_cores}" -lt 1 ]] && _ghz_cores=1

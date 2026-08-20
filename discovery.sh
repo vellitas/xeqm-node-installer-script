@@ -10,9 +10,9 @@ discover_system() {
     ds__result[codename]=""
     # sysctl hw.memsize returns bytes; convert to kB to match Linux /proc/meminfo units
     ds__result[memory]="$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)"
-    ds__result[free_space_root_mount]="$(df / | awk 'END{ print $4 }')"
-    ds__result[free_space_home_mount]="$(df ~ | awk 'END{ print $4 }')"
-    ds__result[free_space_var_lib]="$(df ~ | awk 'END{ print $4 }')"
+    ds__result[free_space_root_mount]="$(df -k / | awk 'END{ print $4 }')"
+    ds__result[free_space_home_mount]="$(df -k ~ | awk 'END{ print $4 }')"
+    ds__result[free_space_var_lib]="$(df -k ~ | awk 'END{ print $4 }')"
   else
     ds__result[distro]="$(lsb_release -a 2> /dev/null | grep -oP 'Distributor ID:\t+\K[a-zA-Z0-9-_\s]+' | awk '{ print tolower($1) }')"
     ds__result[release]="$(lsb_release -a 2>/dev/null | grep 'Release:' | awk '{ print $2 }')"
