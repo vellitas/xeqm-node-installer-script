@@ -819,18 +819,24 @@ compile_binary_to_opt() {
     # BUILD_GUI_DEPS=OFF skips hidapi/libusb — not needed for service node daemon.
     brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium \
       pkg-config gmp unbound binutils ldns xz protobuf 2>/dev/null || true
+    local _brew_prefix; _brew_prefix="$(brew --prefix)"
     local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
     local _expat_root; _expat_root="$(brew --prefix expat)"
     local _ldns_root;  _ldns_root="$(brew --prefix ldns)"
+    local _zmq_root;   _zmq_root="$(brew --prefix zeromq)"
     # macOS BSD ar rejects archive member names > 15 chars (e.g. curlmultiholder.cpp.o).
     # GNU gar (binutils) handles any name length; ld64 can read SYSV archives.
     local _gar; _gar="$(brew --prefix binutils)/bin/gar"
     local _granlib; _granlib="$(brew --prefix binutils)/bin/granlib"
+    # oxen-mq checks for system zeromq via pkg_check_modules before falling back
+    # to building bundled libzmq from source (which fails the cmake 4.x version
+    # check). Export PKG_CONFIG_PATH so cmake can find brew's zeromq 4.3+.
+    export PKG_CONFIG_PATH="${_brew_prefix}/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
     local _cmake_extra="-DCMAKE_AR=${_gar} -DCMAKE_RANLIB=${_granlib} \
       -DBUILD_GUI_DEPS=OFF \
       -DOPENSSL_ROOT_DIR=${_ossl_root} \
       -DBOOST_ROOT=$(brew --prefix boost) \
-      -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root};${_ldns_root} \
+      -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root};${_ldns_root};${_zmq_root} \
       -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
     local _nproc; _nproc="$(sysctl -n hw.logicalcpu)"
   else
