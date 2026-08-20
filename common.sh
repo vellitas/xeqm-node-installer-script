@@ -815,14 +815,23 @@ compile_binary_to_opt() {
       exit 1
     fi
     echo -e "  Installing build dependencies via Homebrew..."
-    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium pkg-config gmp unbound binutils 2>/dev/null || true
+    # Match what Linux builds need (ldns=DNS seed lookup, xz=liblzma, protobuf=wallet).
+    # BUILD_GUI_DEPS=OFF skips hidapi/libusb — not needed for service node daemon.
+    brew install cmake boost openssl@3 readline zeromq miniupnpc expat libsodium \
+      pkg-config gmp unbound binutils ldns xz protobuf 2>/dev/null || true
     local _ossl_root; _ossl_root="$(brew --prefix openssl@3)"
     local _expat_root; _expat_root="$(brew --prefix expat)"
+    local _ldns_root;  _ldns_root="$(brew --prefix ldns)"
     # macOS BSD ar rejects archive member names > 15 chars (e.g. curlmultiholder.cpp.o).
     # GNU gar (binutils) handles any name length; ld64 can read SYSV archives.
     local _gar; _gar="$(brew --prefix binutils)/bin/gar"
     local _granlib; _granlib="$(brew --prefix binutils)/bin/granlib"
-    local _cmake_extra="-DCMAKE_AR=${_gar} -DCMAKE_RANLIB=${_granlib} -DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+    local _cmake_extra="-DCMAKE_AR=${_gar} -DCMAKE_RANLIB=${_granlib} \
+      -DBUILD_GUI_DEPS=OFF \
+      -DOPENSSL_ROOT_DIR=${_ossl_root} \
+      -DBOOST_ROOT=$(brew --prefix boost) \
+      -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root};${_ldns_root} \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
     local _nproc; _nproc="$(sysctl -n hw.logicalcpu)"
   else
     sudo apt-get -y install build-essential cmake pkg-config libboost-all-dev libssl-dev \
@@ -853,8 +862,13 @@ compile_binary_to_opt() {
   ) || {
     echo -e "\033[0;31merror\033[0m: compile failed." >&2
     if [[ -f "${_build_log}" ]]; then
-      echo "--- build log (last 60 lines) ---" >&2
-      tail -60 "${_build_log}" >&2
+      # Persist the log before wiping the build dir so it can be inspected.
+      cp "${_build_log}" /tmp/xeqm-build-error.log 2>/dev/null || true
+      echo "--- compiler errors ---" >&2
+      grep -n "error:" "${_build_log}" | grep -v "^Binary\|note:\|warning:" | head -30 >&2 || true
+      echo "--- build log (last 80 lines) ---" >&2
+      tail -80 "${_build_log}" >&2
+      echo "(full log: /tmp/xeqm-build-error.log)" >&2
     fi
     rm -rf "${build_dir}"
     exit 1
