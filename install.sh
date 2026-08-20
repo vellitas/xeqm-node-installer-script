@@ -1108,12 +1108,17 @@ install_agent() {
     local _mac_agent_dir="${HOME}/xeqm-agent"
     local _mac_plist="${HOME}/Library/LaunchAgents/com.xeqmlabs.agent.plist"
 
-    if ! python3 -c "import psutil" 2>/dev/null; then
-      echo -e "  Installing psutil..."
-      pip3 install --quiet psutil
-    fi
-
     mkdir -p "${_mac_agent_dir}"
+
+    local _venv="${_mac_agent_dir}/venv"
+    if [[ ! -d "${_venv}" ]]; then
+      echo -e "  Creating Python virtual environment..."
+      python3 -m venv "${_venv}"
+    fi
+    if ! "${_venv}/bin/python3" -c "import psutil" 2>/dev/null; then
+      echo -e "  Installing psutil..."
+      "${_venv}/bin/pip3" install --quiet psutil
+    fi
 
     local _agent_installed=0
     if [[ -n "${_dashboard_url}" ]]; then
@@ -1151,7 +1156,7 @@ AGENTCONF
 	<string>com.xeqmlabs.agent</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/bin/python3</string>
+		<string>${_mac_agent_dir}/venv/bin/python3</string>
 		<string>${_mac_agent_dir}/xeqm_agent.py</string>
 	</array>
 	<key>StartInterval</key>
