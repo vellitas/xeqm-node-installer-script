@@ -1637,30 +1637,73 @@ wz_detect() {
       return 1  # Esc = Back to previous step
     fi
 
-    # "Customize Ports" selected — edit p2p port per node (rpc=p2p+1, qnet=p2p+2)
-    local _cust_ok=1
-    local _i=1
-    while [[ ${_i} -le ${config[nodes]} ]]; do
-      local _cur="${config["snode${_i}__p2p_bind_port"]}"
-      local _new_p2p
+    # "Customize Ports" selected — choose assignment mode
+    local _port_mode
+    wt_menu "Customize Ports" "How would you like to assign ports?" 10 64 2 _port_mode \
+      "Stepped"    "Start port + step size  (e.g. start=9270, step=100)" \
+      "Individual" "Enter each node's port separately"
+    [[ $? -ne 0 ]] && continue  # Back → re-show summary
+
+    local _apply_ok=1
+
+    if [[ "${_port_mode}" == "Stepped" ]]; then
+      local _start_p2p="" _step=""
+
       while true; do
-        wt_inputbox "Custom Ports — Node ${_i} of ${config[nodes]}" \
-          "P2P port for node ${_i}.\n\nRPC and Quorumnet are auto-set to P2P+1 and P2P+2.\nCurrent: ${_cur}" \
-          10 60 _new_p2p "${_cur}"
-        local _irc=$?
-        if [[ ${_irc} -ne 0 ]]; then _cust_ok=0; break 2; fi
-        if [[ "${_new_p2p}" =~ ^[0-9]+$ && "${_new_p2p}" -ge 1024 && "${_new_p2p}" -le 65533 ]]; then
-          config["snode${_i}__p2p_bind_port"]="${_new_p2p}"
-          config["snode${_i}__rpc_bind_port"]="$(( _new_p2p + 1 ))"
-          config["snode${_i}__quorumnet_port"]="$(( _new_p2p + 2 ))"
-          break
-        fi
+        wt_inputbox "Stepped Ports — Start" \
+          "P2P port for node 1.\n\nAll subsequent nodes: start + (n-1) × step.\nRPC = P2P+1, Quorumnet = P2P+2." \
+          10 64 _start_p2p "${config["snode1__p2p_bind_port"]}"
+        [[ $? -ne 0 ]] && { _apply_ok=0; break; }
+        [[ "${_start_p2p}" =~ ^[0-9]+$ && "${_start_p2p}" -ge 1024 && "${_start_p2p}" -le 65533 ]] && break
         wt_msgbox "Invalid Port" "Enter a number between 1024 and 65533." 8 48
       done
-      _i=$((_i + 1))
-    done
 
-    [[ ${_cust_ok} -eq 0 ]] && continue  # user backed out of port editor — re-show summary
+      if [[ ${_apply_ok} -eq 1 ]]; then
+        while true; do
+          wt_inputbox "Stepped Ports — Step Size" \
+            "Step between successive nodes (default: 100).\n\nExample: start=9270, step=100 → 9270, 9370, 9470, …" \
+            9 64 _step "100"
+          [[ $? -ne 0 ]] && { _apply_ok=0; break; }
+          [[ "${_step}" =~ ^[0-9]+$ && "${_step}" -ge 1 && "${_step}" -le 10000 ]] && break
+          wt_msgbox "Invalid Step" "Enter a step between 1 and 10000." 8 48
+        done
+      fi
+
+      if [[ ${_apply_ok} -eq 1 ]]; then
+        local _si=1
+        while [[ ${_si} -le ${config[nodes]} ]]; do
+          local _p2p=$(( _start_p2p + (_si - 1) * _step ))
+          config["snode${_si}__p2p_bind_port"]="${_p2p}"
+          config["snode${_si}__rpc_bind_port"]="$(( _p2p + 1 ))"
+          config["snode${_si}__quorumnet_port"]="$(( _p2p + 2 ))"
+          _si=$((_si + 1))
+        done
+      fi
+
+    else
+      # Individual — enter each node's port one at a time
+      local _i=1
+      while [[ ${_i} -le ${config[nodes]} ]]; do
+        local _cur="${config["snode${_i}__p2p_bind_port"]}"
+        local _new_p2p
+        while true; do
+          wt_inputbox "Custom Ports — Node ${_i} of ${config[nodes]}" \
+            "P2P port for node ${_i}.\n\nRPC and Quorumnet are auto-set to P2P+1 and P2P+2.\nCurrent: ${_cur}" \
+            10 60 _new_p2p "${_cur}"
+          [[ $? -ne 0 ]] && { _apply_ok=0; break 2; }
+          if [[ "${_new_p2p}" =~ ^[0-9]+$ && "${_new_p2p}" -ge 1024 && "${_new_p2p}" -le 65533 ]]; then
+            config["snode${_i}__p2p_bind_port"]="${_new_p2p}"
+            config["snode${_i}__rpc_bind_port"]="$(( _new_p2p + 1 ))"
+            config["snode${_i}__quorumnet_port"]="$(( _new_p2p + 2 ))"
+            break
+          fi
+          wt_msgbox "Invalid Port" "Enter a number between 1024 and 65533." 8 48
+        done
+        _i=$((_i + 1))
+      done
+    fi
+
+    [[ ${_apply_ok} -eq 0 ]] && continue  # user backed out — re-show summary
 
     # Rebuild summary with updated ports
     _sum="Auto-detected configuration for ${config[nodes]} node(s):\n\n"
