@@ -804,7 +804,8 @@ ensure_xeqm_mdb_copy() {
 
 compile_binary_to_opt() {
   local versioned_bin="$1"
-  local build_dir="/tmp/xeqm-build-$$"
+  # Short path: cmake generates absolute paths in Makefiles; every char counts.
+  local build_dir="/tmp/xb$$"
 
   echo -e "\n\033[1mCompiling XEQM from source...\033[0m"
 
@@ -819,7 +820,6 @@ compile_binary_to_opt() {
     local _expat_root; _expat_root="$(brew --prefix expat)"
     # macOS BSD ar rejects archive member names > 15 chars (e.g. curlmultiholder.cpp.o).
     # GNU gar (binutils) handles any name length; ld64 can read SYSV archives.
-    # Passing CMAKE_AR/CMAKE_RANLIB as -D flags bypasses platform-module override issues.
     local _gar; _gar="$(brew --prefix binutils)/bin/gar"
     local _granlib; _granlib="$(brew --prefix binutils)/bin/granlib"
     local _cmake_extra="-DCMAKE_AR=${_gar} -DCMAKE_RANLIB=${_granlib} -DOPENSSL_ROOT_DIR=${_ossl_root} -DBOOST_ROOT=$(brew --prefix boost) -DCMAKE_PREFIX_PATH=${_expat_root};${_ossl_root} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
@@ -835,8 +835,10 @@ compile_binary_to_opt() {
 
   mkdir -p "${build_dir}"
   local _build_log="${build_dir}/build.log"
-  local built_bin=""
-  built_bin="$(
+
+  # Use a plain subshell ( ) not $( ) so cmake/make output streams go straight
+  # to the terminal (not captured), and we can tee make output to a log file.
+  (
     set -euo pipefail
     cd "${build_dir}"
     git clone --recursive "${config[git_repository]}" xeqm-core
@@ -845,9 +847,10 @@ compile_binary_to_opt() {
     git checkout "${config[install_version]}"
     mkdir -p build && cd build
     cmake -DCMAKE_BUILD_TYPE=Release ${_cmake_extra} ..
-    make -j"${_nproc}" daemon 2>&1 | tee "${_build_log}" >&2
-    find "${build_dir}" -name "xeqm-d" -type f | head -1
-  )" || {
+    echo "  cmake AR: $(grep '^CMAKE_AR:' CMakeCache.txt | cut -d= -f2 || echo unknown)" >&2
+    echo "  cmake RANLIB: $(grep '^CMAKE_RANLIB:' CMakeCache.txt | cut -d= -f2 || echo unknown)" >&2
+    make -j"${_nproc}" daemon 2>&1 | tee "${_build_log}"
+  ) || {
     echo -e "\033[0;31merror\033[0m: compile failed." >&2
     if [[ -f "${_build_log}" ]]; then
       echo "--- build log (last 60 lines) ---" >&2
@@ -857,12 +860,16 @@ compile_binary_to_opt() {
     exit 1
   }
 
-  rm -rf "${build_dir}"
+  local built_bin
+  built_bin="$(find "${build_dir}" -name "xeqm-d" -type f | head -1)"
   if [[ -z "${built_bin}" ]]; then
-    echo -e "\033[0;31merror\033[0m: xeqm-d binary not found after compile." >&2; exit 1
+    echo -e "\033[0;31merror\033[0m: xeqm-d binary not found after compile." >&2
+    rm -rf "${build_dir}"
+    exit 1
   fi
   ${_SUDO} cp "${built_bin}" "${versioned_bin}"
   ${_SUDO} chmod 755 "${versioned_bin}"
+  rm -rf "${build_dir}"
 }
 
 write_canonical_plist() {
