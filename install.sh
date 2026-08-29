@@ -17,6 +17,11 @@ fi
 
 : "${script_basedir:=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)}"
 
+# Canonical agent URL — the single source of truth. The dashboard serves
+# agent/xeqm_agent.py here; the installer always fetches live rather than
+# bundling a copy that can silently drift out of sync.
+readonly _CANONICAL_AGENT_URL="https://missoula.xeqmlabs.com/agent.py"
+
 source "${script_basedir}/common.sh"
 source "${script_basedir}/discovery.sh"
 
@@ -1120,21 +1125,32 @@ install_agent() {
       "${_venv}/bin/pip3" install --quiet psutil
     fi
 
-    local _agent_installed=0
+    local _agent_src=""
+    # Try operator's dashboard first, then canonical URL. Never fall back to a
+    # bundled copy — a stale local file is worse than a clear install failure.
     if [[ -n "${_dashboard_url}" ]]; then
       echo -e "  Fetching agent from dashboard..."
       if curl -fsSL --max-time 15 \
           -o "${_mac_agent_dir}/xeqm_agent.py" \
           "${_dashboard_url}/agent.py" 2>/dev/null; then
-        _agent_installed=1
-        echo -e "  Fetched: ${_dashboard_url}/agent.py"
+        _agent_src="${_dashboard_url}/agent.py"
+        echo -e "  Fetched: ${_agent_src}"
       else
-        echo -e "  \033[0;33m[WARN]\033[0m Could not reach dashboard — using bundled agent"
+        echo -e "  \033[0;33m[WARN]\033[0m Dashboard unreachable — trying canonical URL"
       fi
     fi
-    if [[ "${_agent_installed}" -eq 0 ]]; then
-      cp "${script_basedir}/xeqm_agent.py" "${_mac_agent_dir}/xeqm_agent.py"
-      echo -e "  Installed: bundled xeqm_agent.py"
+    if [[ -z "${_agent_src}" ]]; then
+      echo -e "  Fetching agent from canonical URL..."
+      if curl -fsSL --max-time 15 \
+          -o "${_mac_agent_dir}/xeqm_agent.py" \
+          "${_CANONICAL_AGENT_URL}" 2>/dev/null; then
+        _agent_src="${_CANONICAL_AGENT_URL}"
+        echo -e "  Fetched: ${_agent_src}"
+      else
+        echo -e "  \033[0;31m[ERROR]\033[0m Could not fetch agent from dashboard or canonical URL."
+        echo -e "         Check network connectivity and try again."
+        return 1
+      fi
     fi
     chmod 755 "${_mac_agent_dir}/xeqm_agent.py"
 
@@ -1203,19 +1219,28 @@ PLISTEOF
 
   sudo mkdir -p /opt/xeqm-agent
 
-  local _agent_installed=0
+  local _agent_src=""
+  # Try operator's dashboard first, then canonical URL. Never fall back to a
+  # bundled copy — a stale local file is worse than a clear install failure.
   if [[ -n "${_dashboard_url}" ]]; then
     echo -e "  Fetching agent from dashboard..."
     if sudo wget -q --timeout=15 -O /opt/xeqm-agent/xeqm_agent.py "${_dashboard_url}/agent.py" 2>/dev/null; then
-      _agent_installed=1
-      echo -e "  Fetched: ${_dashboard_url}/agent.py"
+      _agent_src="${_dashboard_url}/agent.py"
+      echo -e "  Fetched: ${_agent_src}"
     else
-      echo -e "  \033[0;33m[WARN]\033[0m Could not reach dashboard — using bundled agent"
+      echo -e "  \033[0;33m[WARN]\033[0m Dashboard unreachable — trying canonical URL"
     fi
   fi
-  if [[ "${_agent_installed}" -eq 0 ]]; then
-    sudo cp "${script_basedir}/xeqm_agent.py" /opt/xeqm-agent/xeqm_agent.py
-    echo -e "  Installed: bundled xeqm_agent.py"
+  if [[ -z "${_agent_src}" ]]; then
+    echo -e "  Fetching agent from canonical URL..."
+    if sudo wget -q --timeout=15 -O /opt/xeqm-agent/xeqm_agent.py "${_CANONICAL_AGENT_URL}" 2>/dev/null; then
+      _agent_src="${_CANONICAL_AGENT_URL}"
+      echo -e "  Fetched: ${_agent_src}"
+    else
+      echo -e "  \033[0;31m[ERROR]\033[0m Could not fetch agent from dashboard or canonical URL."
+      echo -e "         Check network connectivity and try again."
+      return 1
+    fi
   fi
 
   sudo chmod 755 /opt/xeqm-agent/xeqm_agent.py
