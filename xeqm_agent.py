@@ -641,7 +641,8 @@ def discover_launchd_units(
 def build_payload(rpc_urls: list[str],
                   systemd_pattern: str = "xeqmnode_snode*.service",
                   systemd_unit_dir: str = "/etc/systemd/system",
-                  rpc_timeout: float = 5.0) -> dict:
+                  rpc_timeout: float = 5.0,
+                  companion_rpc_timeout: float = 15.0) -> dict:
     metrics = collect_host_metrics()
     containers: list[dict] = []
 
@@ -654,14 +655,36 @@ def build_payload(rpc_urls: list[str],
     url_to_unit = {url: name for name, url in systemd_units}
     rpc_urls = list(rpc_urls) + [url for _name, url in systemd_units]
 
+    # Auto-detect companion daemons (xeqm-pubnode, xeqm-seed) on hosts that
+    # have no snode units (pn-1..5, seed-1..5). No config required — if the
+    # unit is active, probe its standard admin RPC port.
+    companion_urls: set[str] = set()
+    if not rpc_urls and sys.platform != "darwin":
+        _companion_url = "http://127.0.0.1:9231"
+        for _companion in COMPANION_DAEMONS:
+            try:
+                _r = subprocess.run(
+                    ["/bin/systemctl", "is-active", f"{_companion}.service"],
+                    capture_output=True, text=True, timeout=5)
+                if (_r.stdout or "").strip() == "active":
+                    rpc_urls.append(_companion_url)
+                    url_to_unit[_companion_url] = _companion
+                    companion_urls.add(_companion_url)
+                    break
+            except Exception:
+                pass
+
     # Build (url, known_pubkey_or_None) probes from explicit URLs.
     # Pubkey is resolved per URL via get_pubkey on the snode's admin RPC.
+    # Companion daemon probes (seed/pn hosts) use companion_rpc_timeout since
+    # block processing can hold the blockchain mutex for >5s on large SN lists.
     probes: list[tuple[str, str | None]] = []
     seen_urls: set[str] = set()
     for url in rpc_urls:
         if url in seen_urls:
             continue
-        probes.append((url, get_pubkey(url, rpc_timeout)))
+        _t = companion_rpc_timeout if url in companion_urls else rpc_timeout
+        probes.append((url, get_pubkey(url, _t)))
         seen_urls.add(url)
 
     # Single get_info pass per URL: collect per-snode peer counts + version,
@@ -690,7 +713,7 @@ def build_payload(rpc_urls: list[str],
     host_fd_limit: int | None = None
     host_fd_used: int | None = None
     for url, pk in probes:
-        info = get_info(url, rpc_timeout)
+        info = get_info(url, companion_rpc_timeout if url in companion_urls else rpc_timeout)
         if not info:
             continue
         # Accept only semver-shaped strings (must contain a dot).
