@@ -31,6 +31,13 @@ sudo git clone https://github.com/vellitas/xeqm-node-installer-script /opt/xeqm-
 cd /opt/xeqm-node-installer-script
 ```
 
+**Prefer a fixed, tested version?** Pin to a release tag instead of tracking `main` (recommended for production / before a hard fork):
+
+```bash
+sudo git clone --branch v6.2 https://github.com/vellitas/xeqm-node-installer-script /opt/xeqm-node-installer-script
+cd /opt/xeqm-node-installer-script
+```
+
 **Already have the scripts? Pull the latest before doing anything:**
 
 ```bash
