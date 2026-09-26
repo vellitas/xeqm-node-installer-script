@@ -38,6 +38,7 @@ command_options_set=(
   [daemon_log_level]=0
   [git_repository]=0
   [open_firewall]=0
+  [no_open_firewall]=0
   [quiet]=0
   [force]=0
 )
@@ -129,7 +130,7 @@ process_command_line_args() {
 }
 
 parse_command_line_args() {
-  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,force -- "$@")"
+  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,force -- "$@")"
   eval set -- "${args}"
 
   while :
@@ -147,6 +148,7 @@ parse_command_line_args() {
       --set-daemon-log-level)         command_options_set[daemon_log_level]=1; daemon_log_level_option_value="$2"; shift 2 ;;
       --git-repository)               command_options_set[git_repository]=1; git_repository_option_value="$2"; shift 2 ;;
       --open-firewall)                command_options_set[open_firewall]=1; shift ;;
+      --no-open-firewall)             command_options_set[no_open_firewall]=1; shift ;;
       --force)                        command_options_set[force]=1; shift ;;
       --)                             shift ; break ;;
       *)                              echo "Unexpected option: $1" ;
@@ -207,10 +209,21 @@ set_config_and_execute_info_commands() {
     prompt_service_node_public_ip
   fi
 
-  if [[ "${command_options_set[open_firewall]}" -eq 1 ]]; then
+  if [[ "${command_options_set[no_open_firewall]}" -eq 1 ]]; then
+    # Explicit opt-out: rely on an external / provider firewall.
+    config[open_firewall]=0
+    config[firewall_mode]='external'
+  elif [[ "${command_options_set[open_firewall]}" -eq 1 ]]; then
     config[open_firewall]=1
     config[firewall_mode]='ufw'
-  elif [[ "${config[quiet_mode]}" -eq 0 ]]; then
+  elif [[ "${config[quiet_mode]}" -eq 1 ]]; then
+    # Non-interactive default: open the firewall. A service node is useless if its
+    # p2p/quorumnet ports are unreachable, and silently leaving them closed is the
+    # most common install footgun. firewall.sh runs `ufw allow ssh` before enabling,
+    # so this cannot lock you out. Opt out with --no-open-firewall.
+    config[open_firewall]=1
+    config[firewall_mode]='ufw'
+  else
     prompt_firewall_mode
   fi
 
@@ -1497,7 +1510,12 @@ Options:
 
                                         Example:   --set-daemon-log-level 0,stacktrace:FATAL
 
-  --open-firewall                       Auto-configure UFW/iptables for all required ports.
+  --open-firewall                       Force UFW/iptables auto-configure of the node ports.
+                                        DEFAULT for non-interactive (--quiet) installs, because a
+                                        service node needs its p2p/quorumnet ports reachable.
+
+  --no-open-firewall                    Opt out of touching the host firewall (rely on an external
+                                        or provider firewall). SSH access is always preserved.
 
   -h  --help                            Show this help text
 
