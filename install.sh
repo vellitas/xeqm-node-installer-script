@@ -217,12 +217,13 @@ set_config_and_execute_info_commands() {
     config[open_firewall]=1
     config[firewall_mode]='ufw'
   elif [[ "${config[quiet_mode]}" -eq 1 ]]; then
-    # Non-interactive default: open the firewall. A service node is useless if its
-    # p2p/quorumnet ports are unreachable, and silently leaving them closed is the
-    # most common install footgun. firewall.sh runs `ufw allow ssh` before enabling,
-    # so this cannot lock you out. Opt out with --no-open-firewall.
+    # Non-interactive default: open the firewall, but AUTO-DETECT the host's
+    # existing firewall (open_firewall_for_node uses ufw only if it's already
+    # active, otherwise iptables). Do NOT force a ufw install: installing ufw
+    # removes iptables-persistent and can fail outright on a host pending a
+    # kernel upgrade. Leave firewall_mode unset for detection. A service node
+    # still needs its ports reachable; opt out entirely with --no-open-firewall.
     config[open_firewall]=1
-    config[firewall_mode]='ufw'
   else
     prompt_firewall_mode
   fi
@@ -730,7 +731,8 @@ install_manager() {
     fi
 
     if [[ "${config[open_firewall]:-0}" -eq 1 ]]; then
-      open_firewall_for_node "${node_config[p2p_bind_port]}" "${node_config[quorumnet_port]}"
+      open_firewall_for_node "${node_config[p2p_bind_port]}" "${node_config[quorumnet_port]}" || \
+        echo -e "\n\033[0;33mwarning: automatic firewall setup failed. The node is installed and running; open p2p ${node_config[p2p_bind_port]}/tcp and quorumnet ${node_config[quorumnet_port]} (tcp+udp) yourself.\033[0m"
     fi
 
     echo -e "\n  \033[1;32m[DONE]\033[0m Service Node ${idx} (${snode_name}) installed."
