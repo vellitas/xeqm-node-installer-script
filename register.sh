@@ -336,15 +336,23 @@ register_run() {
       2>/dev/null | grep -o '"staking_requirement":[0-9]*' | cut -d: -f2 || true)"
     : "${staking_req:=200000000000000}"
 
-    local reg_cmd
-    reg_cmd="$(curl -s -m 5 "http://127.0.0.1:${rpc_port}/json_rpc" \
-      -X POST -H 'Content-Type: application/json' \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"get_service_node_registration_cmd\",\
+    # The registration RPC computes a signature and can take several seconds,
+    # especially while the daemon is busy (post-restart, catching up, or under
+    # load during a multi-node install). A single 5s shot failed intermittently,
+    # so retry with a generous timeout before giving up.
+    local reg_cmd="" _attempt
+    for _attempt in 1 2 3 4 5; do
+      reg_cmd="$(curl -s -m 30 "http://127.0.0.1:${rpc_port}/json_rpc" \
+        -X POST -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"get_service_node_registration_cmd\",\
 \"params\":{\"operator_cut\":\"${node_operator_cuts[${i}]}\",\
 \"contributor_addresses\":[\"${node_wallets[${i}]}\"],\
 \"contributor_amounts\":[${node_contribution_atomics[${i}]}],\
 \"staking_requirement\":${staking_req}}}" \
-      2>/dev/null | grep -o '"registration_cmd":"[^"]*"' | cut -d'"' -f4 || true)"
+        2>/dev/null | grep -o '"registration_cmd":"[^"]*"' | cut -d'"' -f4 || true)"
+      [[ -n "${reg_cmd}" ]] && break
+      sleep 3
+    done
 
     if [[ -z "${reg_cmd}" ]]; then
       reg_cmds+=( "" )
