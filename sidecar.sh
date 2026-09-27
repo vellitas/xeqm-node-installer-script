@@ -90,6 +90,22 @@ SVC
   echo "installed arc-oracle@.service"
 fi
 
+# snode_rpc PORT METHOD -> raw JSON on stdout (empty on failure).
+# Retries with a generous timeout: a busy or freshly-rebooted daemon can take
+# 15-20s to answer its admin RPC, and silently dropping a healthy mainnet node
+# is the kind of surprise that generates support tickets.
+snode_rpc() {
+  local port="$1" method="$2" out
+  for _try in 1 2 3; do
+    out="$(curl -s --max-time 20 "http://127.0.0.1:${port}/json_rpc" \
+      -H 'content-type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"${method}\"}" 2>/dev/null || true)"
+    [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+    sleep 2
+  done
+  return 0
+}
+
 # ── 3. discover service nodes without a sidecar ────────────────────────────────
 existing_ports="$(grep -hoE 'rpc_url[[:space:]]*=[[:space:]]*"http://127\.0\.0\.1:[0-9]+"' "$CONFDIR"/*.toml 2>/dev/null | grep -oE ':[0-9]+"' | grep -oE '[0-9]+' | sort -u | tr '\n' ' ' || true)"
 
@@ -103,17 +119,19 @@ while read -r _pid cmd; do
   fi
   [ -z "$port" ] && continue
   case " $existing_ports " in *" $port "*) continue ;; esac    # already coupled to a sidecar
-  nettype="$(curl -s --max-time 5 "http://127.0.0.1:$port/json_rpc" -H 'content-type: application/json' \
-    -d '{"jsonrpc":"2.0","id":0,"method":"get_info"}' | python3 -c 'import sys,json
+  nettype="$(snode_rpc "$port" get_info | python3 -c 'import sys,json
 try:
   r=json.load(sys.stdin)["result"]; print(r.get("nettype") or ("mainnet" if r.get("mainnet") else "?"))
 except Exception: print("?")' 2>/dev/null || echo "?")"
-  [ "$nettype" = "mainnet" ] || continue      # only mainnet service nodes can join the mainnet gate
+  case "$nettype" in
+    mainnet) : ;;                                   # good
+    testnet|stagenet|fakechain|devnet) continue ;;  # definitively not mainnet -> skip
+    *)  # RPC did not answer in time: do not silently drop a possibly-healthy node
+        echo "  note: node on admin port $port was slow to answer; including it — make sure it is your mainnet node before selecting." >&2 ;;
+  esac
   dd="$(printf '%s' "$cmd" | grep -oE 'data-dir[= ][^ ]+' | sed 's/^data-dir[= ]//' | head -1 || true)"
   name="$(basename "${dd:-snode-$port}")"
-  sn="$(curl -s --max-time 5 "http://127.0.0.1:$port/json_rpc" -H 'content-type: application/json' \
-        -d '{"jsonrpc":"2.0","id":0,"method":"get_service_keys"}' \
-        | python3 -c 'import sys,json
+  sn="$(snode_rpc "$port" get_service_keys | python3 -c 'import sys,json
 try: print(json.load(sys.stdin)["result"]["service_node_pubkey"][:12])
 except Exception: print("unknown")' 2>/dev/null || echo unknown)"
   CAND_PORT+=("$port"); CAND_NAME+=("$name"); CAND_SN+=("$sn")
