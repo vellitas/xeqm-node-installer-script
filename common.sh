@@ -1198,6 +1198,20 @@ wt_menu() {
   return ${_wm_rc}
 }
 
+# wt_checklist <title> <body> <h> <w> <list-h> <nameref-result> tag1 item1 status1 ...
+# Multi-select. Result nameref gets the chosen tags, space-separated (quoted).
+wt_checklist() {
+  local _wc_title="$1" _wc_body="$2" _wc_h="$3" _wc_w="$4" _wc_lh="$5"
+  local -n _wc_result="$6"
+  shift 6
+  local _wc_choice
+  _wc_choice="$(whiptail --title "${_wc_title}" --cancel-button "Back" \
+    --checklist "${_wc_body}" "${_wc_h}" "${_wc_w}" "${_wc_lh}" "$@" 3>&1 1>&2 2>&3)"
+  local _wc_rc=$?
+  [[ ${_wc_rc} -eq 0 ]] && _wc_result="${_wc_choice}"
+  return ${_wc_rc}
+}
+
 # wt_inputbox <title> <body> <h> <w> <nameref-result> [default]
 wt_inputbox() {
   local _wi_title="$1" _wi_body="$2" _wi_h="$3" _wi_w="$4"

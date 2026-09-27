@@ -1358,6 +1358,10 @@ next_steps() {
     echo -e "       \033[1msudo bash ${script_basedir}/register.sh\033[0m"
   fi
 
+  # [+] Oracle sidecar (guided): discovers your service nodes and sets up sidecars
+  echo -e "\n\033[1m  [+]  Run an oracle sidecar\033[0m  (earn oracle rewards — pick nodes from a list, nothing to edit)\n"
+  echo -e "       \033[1msudo bash ${script_basedir}/sidecar.sh\033[0m"
+
   # [2] Firewall ports — all installed nodes
   echo -e "\n\033[1m  [2]  Open these firewall ports\033[0m\n"
   if [[ "${#_ns_lines[@]}" -gt 0 ]]; then
