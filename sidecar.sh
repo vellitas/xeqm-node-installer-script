@@ -103,6 +103,12 @@ while read -r _pid cmd; do
   fi
   [ -z "$port" ] && continue
   case " $existing_ports " in *" $port "*) continue ;; esac    # already coupled to a sidecar
+  nettype="$(curl -s --max-time 5 "http://127.0.0.1:$port/json_rpc" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":0,"method":"get_info"}' | python3 -c 'import sys,json
+try:
+  r=json.load(sys.stdin)["result"]; print(r.get("nettype") or ("mainnet" if r.get("mainnet") else "?"))
+except Exception: print("?")' 2>/dev/null || echo "?")"
+  [ "$nettype" = "mainnet" ] || continue      # only mainnet service nodes can join the mainnet gate
   dd="$(printf '%s' "$cmd" | grep -oE 'data-dir[= ][^ ]+' | sed 's/^data-dir[= ]//' | head -1 || true)"
   name="$(basename "${dd:-snode-$port}")"
   sn="$(curl -s --max-time 5 "http://127.0.0.1:$port/json_rpc" -H 'content-type: application/json' \
@@ -111,7 +117,7 @@ while read -r _pid cmd; do
 try: print(json.load(sys.stdin)["result"]["service_node_pubkey"][:12])
 except Exception: print("unknown")' 2>/dev/null || echo unknown)"
   CAND_PORT+=("$port"); CAND_NAME+=("$name"); CAND_SN+=("$sn")
-done < <(pgrep -af 'xeqm-d' | grep -- '--service-node' || true)
+done < <(pgrep -af 'xeqm-d' | grep -- '--service-node' | grep -vE -- '--testnet|--stagenet' || true)
 
 if [ "${#CAND_PORT[@]}" -eq 0 ]; then
   echo "No service nodes without a sidecar were found on this host."
