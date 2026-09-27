@@ -33,6 +33,20 @@ command -v python3 >/dev/null || { echo "python3 required" >&2; exit 1; }
 command -v curl    >/dev/null || { echo "curl required" >&2; exit 1; }
 ARCH="$(uname -m)"
 
+# This installer configures the sidecar on the Linux host that runs the service
+# node. Guard against running it on a workstation (e.g. macOS), which otherwise
+# fails later with a confusing 404 on the binary fetch.
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "This installer runs on the Linux host that runs your XEQM service node, not on your workstation." >&2
+  echo "SSH into that host (the machine running 'xeqm-d --service-node') and run it there." >&2
+  exit 1
+fi
+case "$ARCH" in
+  x86_64|aarch64) : ;;
+  arm64) echo "Detected CPU arch 'arm64' (this looks like a Mac). Run this on your Linux service-node host, where the arch is x86_64 or aarch64." >&2; exit 1 ;;
+  *) echo "Unsupported CPU arch '$ARCH'. The arc-oracle binary is published for x86_64 and aarch64 Linux." >&2; exit 1 ;;
+esac
+
 jget() { python3 -c 'import sys,json
 d=json.load(sys.stdin)
 for k in sys.argv[1].split("."): d=d[k]
