@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guided ARC oracle sidecar setup.
+# Guided EXIOM Oracle sidecar setup.
 #
 # Discovers the XEQM service nodes on this host that don't yet have an oracle
 # sidecar, lets you tick which ones to run a sidecar for, and does the rest —
@@ -12,12 +12,12 @@ script_basedir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=common.sh
 source "${script_basedir}/common.sh"
 
-PLATFORM_URL="${ARC_PLATFORM_URL:-https://api.exiom.network}"     # gate/chain/mask config
-DASHBOARD_URL="${ARC_DASHBOARD_URL:-https://missoula.xeqmlabs.com}" # the arc-oracle binary
-CONFDIR=/etc/arc-oracle
-BIN=/usr/local/bin/arc-oracle
-USER=arc-oracle
-UNIT=/etc/systemd/system/arc-oracle@.service
+PLATFORM_URL="${EXIOM_PLATFORM_URL:-https://api.exiom.network}"     # gate/chain/mask config
+DASHBOARD_URL="${EXIOM_DASHBOARD_URL:-https://missoula.xeqmlabs.com}" # the exiom-oracle binary
+CONFDIR=/etc/exiom-oracle
+BIN=/usr/local/bin/exiom-oracle
+USER=exiom-oracle
+UNIT=/etc/systemd/system/exiom-oracle@.service
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -44,7 +44,7 @@ fi
 case "$ARCH" in
   x86_64|aarch64) : ;;
   arm64) echo "Detected CPU arch 'arm64' (this looks like a Mac). Run this on your Linux service-node host, where the arch is x86_64 or aarch64." >&2; exit 1 ;;
-  *) echo "Unsupported CPU arch '$ARCH'. The arc-oracle binary is published for x86_64 and aarch64 Linux." >&2; exit 1 ;;
+  *) echo "Unsupported CPU arch '$ARCH'. The exiom-oracle binary is published for x86_64 and aarch64 Linux." >&2; exit 1 ;;
 esac
 
 jget() { python3 -c 'import sys,json
@@ -64,11 +64,11 @@ MASK_PUB="$(printf '%s' "$publisher" | jget pinned_pubkey)"
 
 # ── 2. ensure binary + user + unit template ────────────────────────────────────
 if [ ! -x "$BIN" ]; then
-  echo "Fetching arc-oracle (${ARCH}) from ${DASHBOARD_URL} ..."
+  echo "Fetching exiom-oracle (${ARCH}) from ${DASHBOARD_URL} ..."
   tmp="$(mktemp)"
-  curl -fsS --max-time 60 "${DASHBOARD_URL}/bin/${ARCH}/arc-oracle" -o "$tmp" \
-    || { echo "no arc-oracle binary for ${ARCH} on ${DASHBOARD_URL}" >&2; rm -f "$tmp"; exit 1; }
-  want="$(curl -fsS --max-time 20 "${DASHBOARD_URL}/bin/${ARCH}/arc-oracle.sha256" | tr -d ' \n')"
+  curl -fsS --max-time 60 "${DASHBOARD_URL}/bin/${ARCH}/exiom-oracle" -o "$tmp" \
+    || { echo "no exiom-oracle binary for ${ARCH} on ${DASHBOARD_URL}" >&2; rm -f "$tmp"; exit 1; }
+  want="$(curl -fsS --max-time 20 "${DASHBOARD_URL}/bin/${ARCH}/exiom-oracle.sha256" | tr -d ' \n')"
   got="$(sha256sum "$tmp" | cut -d' ' -f1)"
   [ "$want" = "$got" ] || { echo "checksum mismatch: got $got want $want" >&2; rm -f "$tmp"; exit 1; }
   install -m 0755 "$tmp" "$BIN"; rm -f "$tmp"
@@ -79,15 +79,15 @@ install -d -m 0750 -o root -g "$USER" "$CONFDIR"
 if [ ! -f "$UNIT" ]; then
   cat > "$UNIT" <<'SVC'
 [Unit]
-Description=ARC Oracle Sidecar (%i)
+Description=EXIOM Oracle Sidecar (%i)
 After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-User=arc-oracle
-Group=arc-oracle
-ExecStart=/usr/local/bin/arc-oracle --config /etc/arc-oracle/%i.toml
-EnvironmentFile=-/etc/arc-oracle/%i.env
+User=exiom-oracle
+Group=exiom-oracle
+ExecStart=/usr/local/bin/exiom-oracle --config /etc/exiom-oracle/%i.toml
+EnvironmentFile=-/etc/exiom-oracle/%i.env
 Restart=on-failure
 RestartSec=10
 MemoryMax=256M
@@ -95,13 +95,13 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadOnlyPaths=/etc/arc-oracle
-SyslogIdentifier=arc-oracle@%i
+ReadOnlyPaths=/etc/exiom-oracle
+SyslogIdentifier=exiom-oracle@%i
 [Install]
 WantedBy=multi-user.target
 SVC
   systemctl daemon-reload
-  echo "installed arc-oracle@.service"
+  echo "installed exiom-oracle@.service"
 fi
 
 # snode_rpc PORT METHOD -> raw JSON on stdout (empty on failure).
@@ -165,7 +165,7 @@ if wt_available; then
     args+=("${CAND_PORT[$i]}" "${CAND_NAME[$i]}  (sn ${CAND_SN[$i]}…)" "ON")
   done
   chosen=""
-  wt_checklist "ARC Oracle Sidecars" \
+  wt_checklist "EXIOM Oracle Sidecars" \
     "Service nodes on this host without a sidecar.\nTick the ones to run an oracle sidecar for — all will use ${NETNAME} (chain ${CHAIN})." \
     20 76 10 chosen "${args[@]}" || { echo "cancelled"; exit 0; }
   selected="$(printf '%s' "$chosen" | tr -d '"')"
@@ -195,6 +195,10 @@ for port in $selected; do
   cfg="$CONFDIR/$name.toml"; key="$CONFDIR/$name.key.enc"; env="$CONFDIR/$name.env"
   echo "• ${name} (admin port ${port})"
   pass="$(head -c 30 /dev/urandom | base64 | tr -d '\n')"
+  # ARC_ORACLE_PASSPHRASE is the env var the compiled sidecar binary reads; it is
+  # part of the binary's interface, not a cosmetic name. Do NOT rename it to
+  # EXIOM_* until the binary itself is rebuilt (migrate.sh likewise preserves it
+  # in every host's .env).
   printf 'ARC_ORACLE_PASSPHRASE=%s\n' "$pass" > "$env"; chmod 600 "$env"; chown root:root "$env"
   if [ ! -f "$key" ]; then
     ARC_ORACLE_PASSPHRASE="$pass" "$BIN" --init --config "$cfg" >/dev/null 2>&1 || true
@@ -224,12 +228,12 @@ pubkey = "$MASK_PUB"
 CFG
   chown root:"$USER" "$cfg" "$key" 2>/dev/null || true
   chmod 640 "$cfg" "$key" 2>/dev/null || true
-  if ARC_ORACLE_PASSPHRASE="$pass" "$BIN" --enroll --config "$cfg" >"/tmp/arc-enroll-$name.log" 2>&1; then
+  if ARC_ORACLE_PASSPHRASE="$pass" "$BIN" --enroll --config "$cfg" >"/tmp/exiom-enroll-$name.log" 2>&1; then
     chown root:"$USER" "$cfg"; chmod 640 "$cfg"
-    systemctl enable --now "arc-oracle@$name" >/dev/null 2>&1
-    echo "    ✓ enrolled and started (arc-oracle@$name)"
+    systemctl enable --now "exiom-oracle@$name" >/dev/null 2>&1
+    echo "    ✓ enrolled and started (exiom-oracle@$name)"
   else
-    echo "    ✗ enrollment failed — see /tmp/arc-enroll-$name.log"
+    echo "    ✗ enrollment failed — see /tmp/exiom-enroll-$name.log"
     echo "      (the node must be registered, funded, and NTP-synced)"
   fi
 done
