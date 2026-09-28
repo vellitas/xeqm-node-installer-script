@@ -161,10 +161,10 @@ preflight_node() {
     return 1
   fi
 
-  _status="$(echo "${_json}" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)"
-  _height="$(echo "${_json}" | grep -o '"height":[0-9]*' | head -1 | cut -d: -f2)"
-  _target="$(echo "${_json}" | grep -o '"target_height":[0-9]*' | head -1 | cut -d: -f2)"
-  _sn="$(echo "${_json}" | grep -o '"service_node":[a-z]*' | head -1 | cut -d: -f2)"
+  _status="$(echo "${_json}" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  _height="$(echo "${_json}" | grep -o '"height":[0-9]*' | head -1 | cut -d: -f2 || true)"
+  _target="$(echo "${_json}" | grep -o '"target_height":[0-9]*' | head -1 | cut -d: -f2 || true)"
+  _sn="$(echo "${_json}" | grep -o '"service_node":[a-z]*' | head -1 | cut -d: -f2 || true)"
   : "${_height:=0}"; : "${_target:=0}"
 
   if [[ "${_status}" != "OK" ]]; then
@@ -255,7 +255,7 @@ register_run() {
     # "registration_height"; an unregistered node's state has only pubkeys + IP.
     # An unlocking node is funded but has "requested_unlock_height" > 0.
     local _unlock_h
-    _unlock_h="$(echo "${_json}" | grep -o '"requested_unlock_height":[0-9]*' | head -1 | cut -d: -f2)"
+    _unlock_h="$(echo "${_json}" | grep -o '"requested_unlock_height":[0-9]*' | head -1 | cut -d: -f2 || true)"
     if echo "${_json}" | grep -q '"funded":true'; then
       if [[ -n "${_unlock_h}" && "${_unlock_h}" -gt 0 ]]; then
         echo -e "    \033[0;33m[unlocking]\033[0m ${_sn} — stake unlock in progress, skipping"
