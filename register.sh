@@ -45,11 +45,15 @@ ask_node_type() {
       while true; do
         local _fee
         wt_inputbox "${_label} — Operator Fee" \
-          "Percentage of rewards you keep before sharing with contributors.\n\nEnter 0 for no fee.  Maximum is 10." \
-          10 62 _fee "0"
+          "Percentage of rewards you keep before sharing with contributors.\n\nLeave blank for no fee (0%).  Maximum is 10." \
+          10 62 _fee ""
         _rc=$?; [[ ${_rc} -ne 0 ]] && return 1
-        if [[ "${_fee}" =~ ^[0-9]+$ && "${_fee}" -ge 0 && "${_fee}" -le 10 ]]; then
-          _operator_cut="${_fee}"; break
+        _fee="${_fee//[[:space:]]/}"; _fee="${_fee:-0}"
+        if [[ "${_fee}" =~ ^[0-9]+$ ]]; then
+          _fee="$((10#${_fee}))"   # normalize leading zeros ("010" → 10)
+          if [[ "${_fee}" -ge 0 && "${_fee}" -le 10 ]]; then
+            _operator_cut="${_fee}"; break
+          fi
         fi
         wt_msgbox "Invalid Fee" "Please enter a whole number between 0 and 10." 8 50
       done
@@ -70,10 +74,12 @@ ask_node_type() {
       done
 
       while true; do
-        read -rp $'\n\033[1mOperator fee\e[0m — your % of rewards before sharing (0–10) [0]: ' _operator_cut
-        _operator_cut="${_operator_cut:-0}"
-        [[ "${_operator_cut}" =~ ^[0-9]+$ && "${_operator_cut}" -ge 0 && \
-           "${_operator_cut}" -le 10 ]] && break
+        read -rp $'\n\033[1mOperator fee\e[0m — your % of rewards before sharing (0–10) [blank = 0]: ' _operator_cut
+        _operator_cut="${_operator_cut//[[:space:]]/}"; _operator_cut="${_operator_cut:-0}"
+        if [[ "${_operator_cut}" =~ ^[0-9]+$ ]]; then
+          _operator_cut="$((10#${_operator_cut}))"   # normalize leading zeros
+          [[ "${_operator_cut}" -ge 0 && "${_operator_cut}" -le 10 ]] && break
+        fi
         echo -e "  \033[0;33mPlease enter a number between 0 and 10.\033[0m"
       done
     fi
@@ -131,7 +137,64 @@ is_node_registered() {
   _json="$(curl -s -m 5 "http://127.0.0.1:${_rpc_port}/json_rpc" \
     -X POST -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":"0","method":"get_service_node_status"}' 2>/dev/null)"
-  echo "${_json}" | grep -qE '"service_node_state"[^}]*(registered|unlocking)'
+  # registered/funded nodes carry "funded":true in service_node_state; unlocking
+  # nodes are funded with requested_unlock_height > 0 (still counted as on-network)
+  echo "${_json}" | grep -q '"funded":true'
+}
+
+# preflight_node <rpc_port> <name> → 0 if the daemon is ready to produce a
+# registration command, 1 otherwise. Prints a specific reason on failure.
+# Catches the issues that make get_service_node_registration_cmd return -5
+# ("Failed to make registration command"): daemon unreachable, not a service
+# node, or not yet synced (the daemon needs the current height/HF state to sign).
+preflight_node() {
+  local _rpc_port="$1" _name="$2"
+  local _json _height _target _sn _status
+
+  _json="$(curl -s -m 8 "http://127.0.0.1:${_rpc_port}/json_rpc" \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' 2>/dev/null)"
+
+  if [[ -z "${_json}" ]]; then
+    echo -e "  \033[0;31m[FAIL]\033[0m ${_name}: daemon not answering RPC on 127.0.0.1:${_rpc_port}"
+    echo -e "         → is xeqmnode_${_name}.service running? (systemctl status xeqmnode_${_name})"
+    return 1
+  fi
+
+  _status="$(echo "${_json}" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)"
+  _height="$(echo "${_json}" | grep -o '"height":[0-9]*' | head -1 | cut -d: -f2)"
+  _target="$(echo "${_json}" | grep -o '"target_height":[0-9]*' | head -1 | cut -d: -f2)"
+  _sn="$(echo "${_json}" | grep -o '"service_node":[a-z]*' | head -1 | cut -d: -f2)"
+  : "${_height:=0}"; : "${_target:=0}"
+
+  if [[ "${_status}" != "OK" ]]; then
+    echo -e "  \033[0;31m[FAIL]\033[0m ${_name}: daemon status is '${_status:-unknown}', not OK"
+    return 1
+  fi
+
+  # target_height 0 means the daemon has no peers reporting a higher tip; treat
+  # height >= target (target>0) as synced. When target==0 fall back to comparing
+  # against sibling nodes is out of scope — require target>0 && height>=target.
+  if [[ "${_target}" -eq 0 ]]; then
+    echo -e "  \033[0;33m[WARN]\033[0m ${_name}: daemon reports no sync target yet (no peers?). Height ${_height}."
+    echo -e "         → registration may fail until it connects to peers and syncs."
+    return 1
+  fi
+  if [[ "${_height}" -lt "${_target}" ]]; then
+    local _behind=$(( _target - _height ))
+    echo -e "  \033[0;33m[WAIT]\033[0m ${_name}: syncing — height ${_height} / ${_target} (${_behind} behind)"
+    echo -e "         → registration needs a fully synced daemon; let it finish, then retry."
+    return 1
+  fi
+
+  if [[ "${_sn}" != "true" ]]; then
+    echo -e "  \033[0;31m[FAIL]\033[0m ${_name}: daemon is not running in service-node mode (--service-node)"
+    echo -e "         → check the systemd unit's ExecStart includes --service-node"
+    return 1
+  fi
+
+  echo -e "  \033[0;32m[ OK ]\033[0m ${_name}: synced (height ${_height}), service-node mode, RPC :${_rpc_port}"
+  return 0
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -188,10 +251,17 @@ register_run() {
     _json="$(curl -s -m 5 "http://127.0.0.1:${_rpc}/json_rpc" \
       -X POST -H 'Content-Type: application/json' \
       -d '{"jsonrpc":"2.0","id":"0","method":"get_service_node_status"}' 2>/dev/null || true)"
-    if echo "${_json}" | grep -qE '"service_node_state"[^}]*"unlocking"'; then
-      echo -e "    \033[0;33m[unlocking]\033[0m ${_sn} — 14-day stake unlock in progress, skipping"
-    elif echo "${_json}" | grep -qE '"service_node_state"[^}]*"registered"'; then
-      echo -e "    \033[0;32m[registered]\033[0m ${_sn} — already on network, skipping"
+    # A registered/funded node's service_node_state carries "funded":true plus a
+    # "registration_height"; an unregistered node's state has only pubkeys + IP.
+    # An unlocking node is funded but has "requested_unlock_height" > 0.
+    local _unlock_h
+    _unlock_h="$(echo "${_json}" | grep -o '"requested_unlock_height":[0-9]*' | head -1 | cut -d: -f2)"
+    if echo "${_json}" | grep -q '"funded":true'; then
+      if [[ -n "${_unlock_h}" && "${_unlock_h}" -gt 0 ]]; then
+        echo -e "    \033[0;33m[unlocking]\033[0m ${_sn} — stake unlock in progress, skipping"
+      else
+        echo -e "    \033[0;32m[registered]\033[0m ${_sn} — already on network, skipping"
+      fi
     else
       unregistered_snodes+=("${_sn}")
     fi
@@ -296,7 +366,8 @@ register_run() {
       node_rpc_ports+=( "${snode_rpc_map[${_sn}]}" )
       node_wallets+=( "${_shared_wallet}" )
       node_contribution_atomics+=( "$(( _shared_contribution * 1000000000 ))" )
-      node_operator_cuts+=( "$(( _shared_cut * 100 ))" )
+      # daemon expects the fee as a plain percent string ("2" = 2%); do NOT ×100
+      node_operator_cuts+=( "${_shared_cut}" )
     done
   else
     local last_wallet=""
@@ -315,8 +386,30 @@ register_run() {
       node_rpc_ports+=( "${rpc_port}" )
       node_wallets+=( "${_wallet_address}" )
       node_contribution_atomics+=( "$(( _contribution_xeqm * 1000000000 ))" )
-      node_operator_cuts+=( "$(( _operator_cut * 100 ))" )
+      # daemon expects the fee as a plain percent string ("2" = 2%); do NOT ×100
+      node_operator_cuts+=( "${_operator_cut}" )
     done
+  fi
+
+  # ── Pre-flight: verify each daemon can actually be registered ──────────────
+  echo -e "\n\033[1mPre-flight checks...\033[0m\n"
+  local _preflight_ok=1 _pi
+  for _pi in "${!node_names[@]}"; do
+    preflight_node "${node_rpc_ports[${_pi}]}" "${node_names[${_pi}]}" || _preflight_ok=0
+  done
+  if [[ "${_preflight_ok}" -ne 1 ]]; then
+    echo -e "\n  \033[0;31mOne or more nodes are not ready to register (see above).\033[0m"
+    echo -e "  The most common cause is a daemon still syncing — the registration RPC"
+    echo -e "  needs a fully synced service node to sign. Wait for sync to finish and re-run.\n"
+    if wt_available; then
+      wt_yesno "Pre-flight failed" \
+        "Some nodes are not ready (not synced / unreachable / not in SN mode).\n\nContinue anyway and try to fetch commands?" \
+        11 62 "Continue anyway" "Abort" || { echo -e "Aborted.\n"; exit 1; }
+    else
+      local _cont
+      read -rp $'\n\033[1mContinue anyway?\e[0m (y/N): ' _cont
+      [[ "${_cont}" =~ ^[Yy]$ ]] || { echo -e "Aborted.\n"; exit 1; }
+    fi
   fi
 
   # ── Fetch registration commands ───────────────────────────────────────────
@@ -340,17 +433,25 @@ register_run() {
     # especially while the daemon is busy (post-restart, catching up, or under
     # load during a multi-node install). A single 5s shot failed intermittently,
     # so retry with a generous timeout before giving up.
-    local reg_cmd="" _attempt
+    local reg_cmd="" _resp="" _err="" _attempt
     for _attempt in 1 2 3 4 5; do
-      reg_cmd="$(curl -s -m 30 "http://127.0.0.1:${rpc_port}/json_rpc" \
+      _resp="$(curl -s -m 30 "http://127.0.0.1:${rpc_port}/json_rpc" \
         -X POST -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"get_service_node_registration_cmd\",\
 \"params\":{\"operator_cut\":\"${node_operator_cuts[${i}]}\",\
 \"contributor_addresses\":[\"${node_wallets[${i}]}\"],\
 \"contributor_amounts\":[${node_contribution_atomics[${i}]}],\
 \"staking_requirement\":${staking_req}}}" \
-        2>/dev/null | grep -o '"registration_cmd":"[^"]*"' | cut -d'"' -f4 || true)"
+        2>/dev/null || true)"
+      reg_cmd="$(echo "${_resp}" | grep -o '"registration_cmd":"[^"]*"' | cut -d'"' -f4 || true)"
       [[ -n "${reg_cmd}" ]] && break
+      # capture the daemon's actual error so the failure is explainable — it may
+      # arrive as error.message (e.g. "Failed to make registration command") or
+      # as a non-OK result.status (e.g. "could not parse fee percent").
+      _err="$(echo "${_resp}" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+      if [[ -z "${_err}" ]]; then
+        _err="$(echo "${_resp}" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4 | grep -v '^OK$' || true)"
+      fi
       sleep 3
     done
 
@@ -358,6 +459,11 @@ register_run() {
       reg_cmds+=( "" )
       all_ok=0
       echo -e "  \033[0;31m[FAIL]\033[0m ${snode_name}: daemon on port ${rpc_port} did not return a command"
+      if [[ -n "${_err}" ]]; then
+        echo -e "         → daemon error: \033[0;31m${_err}\033[0m"
+        [[ "${_err}" == *"Failed to make registration"* ]] && \
+          echo -e "         → this usually means the daemon is not fully synced yet; wait and retry."
+      fi
     else
       reg_cmds+=( "${reg_cmd}" )
       echo -e "  \033[0;32m[ OK ]\033[0m ${snode_name}"
