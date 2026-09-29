@@ -531,18 +531,30 @@ svc_label() {
 
 svc_plist_path() { echo "${XEQM_SVC_DIR}/$(svc_label "${1}").plist"; }
 
+# Return PIDs LISTENING on a port (not ones that merely have a connection whose
+# source/dest port coincides). `lsof -ti :PORT` matched both, so clearing a new
+# node's port could kill an unrelated running daemon that had a peer connection
+# touching that port number — this took down a live registered node.
+_listener_pids() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -tulnpH "sport = :${1}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' '
+  else
+    lsof -ti ":${1}" -sTCP:LISTEN 2>/dev/null | tr '\n' ' '
+  fi
+}
+
 clear_port_if_stale() {
   local port="$1"
   local pids
-  pids="$(lsof -ti ":${port}" 2>/dev/null || true)"
-  if [[ -n "${pids}" ]]; then
-    echo -e "  Port ${port} is held by stale process(es) — clearing..."
+  pids="$(_listener_pids "${port}")"
+  if [[ -n "${pids// /}" ]]; then
+    echo -e "  Port ${port} has a stale LISTENER — clearing..."
     # shellcheck disable=SC2086
     kill ${pids} 2>/dev/null || true
     sleep 2
-    pids="$(lsof -ti ":${port}" 2>/dev/null || true)"
+    pids="$(_listener_pids "${port}")"
     # shellcheck disable=SC2086
-    [[ -n "${pids}" ]] && kill -9 ${pids} 2>/dev/null || true
+    [[ -n "${pids// /}" ]] && kill -9 ${pids} 2>/dev/null || true
     sleep 1
   fi
 }
@@ -996,8 +1008,8 @@ Group=xeqm
 StateDirectory=xeqm/${snode_name}
 StateDirectoryMode=0700
 WorkingDirectory=${data_dir}
-ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seeds.xeqmlabs.com:9230${opt_log_level_arg}
-Restart=on-failure
+ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${opt_log_level_arg}
+Restart=always
 RestartSec=15s
 TimeoutStartSec=300s
 TimeoutStopSec=60s
