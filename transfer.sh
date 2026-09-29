@@ -371,6 +371,16 @@ local_transfer() {
   local tmp_archive; tmp_archive="$(mktemp /tmp/xeqm-transfer-XXXXXX.tar.gz)"
   sudo tar -czf "${tmp_archive}" -C "${from_dir}" "${key_files[@]}"
 
+  # The identity is MOVING to ${to_node}. The SOURCE must stop and give up its
+  # keys — otherwise two daemons broadcast uptime proofs under one identity and
+  # the network decommissions/deregisters the node (stake at risk).
+  echo -e "  Stopping SOURCE '${from_node}' daemon (its identity is moving off it)..."
+  stop_node "${from_node}" "${from_layout}" || true
+  local _src_ts; _src_ts="$(date +%Y%m%d%H%M%S)"
+  for _kf in "${key_files[@]}"; do
+    sudo mv "${from_dir}/${_kf}" "${from_dir}/${_kf}.moved.${_src_ts}" 2>/dev/null || true
+  done
+
   echo -e "  Stopping '${to_node}' daemon..."
   stop_node "${to_node}" "${to_layout}"
 
