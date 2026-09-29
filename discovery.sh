@@ -110,11 +110,29 @@ discover_free_port_sets() {
   return 0
 }
 
+# True if a port is DECLARED in any installed xeqm node unit, even if that node
+# is currently stopped. Checking only live listeners let a stopped-but-installed
+# node's port be reused, so it would collide (and fail to start) on next boot.
+_port_declared_in_units() {
+  local port="$1" files
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    files=$(ls "${XEQM_SVC_DIR}"/*.plist 2>/dev/null)
+  else
+    files=$(ls /etc/systemd/system/xeqmnode_*.service 2>/dev/null)
+  fi
+  [[ -z "${files}" ]] && return 1
+  # shellcheck disable=SC2086
+  grep -rhoE -- '--(p2p-bind-port|quorumnet-port|oxenmq-port)[= ][0-9]+|--rpc-admin[= ][0-9.]+:[0-9]+' ${files} 2>/dev/null \
+    | grep -oE '[0-9]+$' | grep -qx "${port}"
+}
+
 validate_port() {
   local port="$1"
 
   if [ "${port}" -lt 5000 ] || [ "${port}" -gt 49151 ]; then
     echo "outside_port_range"
+  elif _port_declared_in_units "${port}"; then
+    echo "port_used"
   elif [[ "${OS_TYPE}" == "Darwin" ]] && lsof -nP -iTCP:"${port}" -iUDP:"${port}" 2>/dev/null | grep -q LISTEN; then
     echo "port_used"
   elif [[ "${OS_TYPE}" != "Darwin" ]] && [[ "$(sudo ss -lnp 2>/dev/null | grep -c ":${port}[^0-9]")" -gt 0 ]]; then

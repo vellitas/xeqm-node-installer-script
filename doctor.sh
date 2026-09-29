@@ -233,7 +233,7 @@ analyze_and_fix() {
     _disk_check_path="$(dirname "${_disk_check_path}")"
   done
   local free_gb
-  free_gb=$(( $(df "${_disk_check_path}" | awk 'END{ print $4 }') / 1024 / 1024 ))
+  free_gb=$(( $(df "${_disk_check_path}" | awk 'END{ print $4+0 }') / 1024 / 1024 ))
   local global_disk_warn=0
   [[ "${free_gb}" -lt 20 ]] && global_disk_warn=1
 
@@ -374,7 +374,7 @@ analyze_and_fix() {
       _data_df_path="$(dirname "${_data_df_path}")"
     done
     local user_disk_gb=0
-    user_disk_gb=$(( $(df "${_data_df_path}" | awk 'END{ print $4 }') / 1024 / 1024 ))
+    user_disk_gb=$(( $(df "${_data_df_path}" | awk 'END{ print $4+0 }') / 1024 / 1024 ))
     local lmdb_db_path="${_ndata}/lmdb/data.mdb"
     local lmdb_gb=0
     [[ -f "${lmdb_db_path}" ]] && \
@@ -757,8 +757,11 @@ analyze_and_fix() {
         printf "  Restarting %s...\n" "${node_names[$_si]}"
         svc_stop "${node_names[$_si]}" 2>/dev/null || true
         sleep 2
-        svc_start "${node_names[$_si]}"
-        echo -e "  \033[0;32mRestarted\033[0m — re-run doctor in a few minutes to confirm"
+        if svc_start "${node_names[$_si]}"; then
+          echo -e "  \033[0;32mRestarted\033[0m — re-run doctor in a few minutes to confirm"
+        else
+          echo -e "  \033[0;31mWARN: ${node_names[$_si]} failed to start — it is DOWN, check journalctl\033[0m"
+        fi
       done
     fi
   fi
@@ -795,18 +798,28 @@ analyze_and_fix() {
         local bad_layout="${node_layouts[${bad_idx}]}"
         echo -e "\n\033[1mFixing blockchain for '${bad_name}'...\033[0m"
         if [[ "${bad_layout}" = "installer" ]]; then
-          sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop'
+          sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop' 2>/dev/null || true
         else
           svc_stop "${bad_name}" 2>/dev/null || true
         fi
         echo -e "  Copying lmdb from donor '${donor_name}'... (may take a few minutes)"
         ${_SUDO} rm -Rf "${bad_data}/lmdb"
-        ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+        # The donor daemon is running — a plain cp -R of its live LMDB yields a
+        # torn copy the bad node may refuse to open. Use xeqm-mdb_copy -c
+        # (consistent hot copy) when available; fall back to cp -R only if not.
+        if [[ -x /opt/xeqm/bin/xeqm-mdb_copy ]]; then
+          ${_SUDO} mkdir -p "${bad_data}/lmdb"
+          if ! ${_SUDO} /opt/xeqm/bin/xeqm-mdb_copy -c "${donor_data}/lmdb" "${bad_data}/lmdb" 2>/dev/null; then
+            ${_SUDO} rm -rf "${bad_data}/lmdb"; ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+          fi
+        else
+          ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+        fi
         [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R "${bad_user}:${bad_user}" "${bad_data}"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
         else
-          svc_start "${bad_name}"
+          svc_start "${bad_name}" || echo -e "  \033[0;31mWARN: ${bad_name} failed to start — DOWN, check journalctl\033[0m"
         fi
         echo -e "  \033[0;32mDone.\033[0m"
       done
@@ -845,7 +858,7 @@ analyze_and_fix() {
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
         else
-          svc_start "${bad_name}"
+          svc_start "${bad_name}" || echo -e "  \033[0;31mWARN: ${bad_name} failed to start — DOWN, check journalctl\033[0m"
         fi
         echo -e "  \033[0;32mDone.\033[0m"
       done

@@ -327,7 +327,8 @@ server_migrate_run() {
   local tmp_ed="/tmp/xeqm-mig-ed25519-$$"
   local tmp_bls="/tmp/xeqm-mig-bls-$$"
 
-  # Stop destination node
+  # Stop destination node (record it so the EXIT trap can restart it on abort)
+  _MIG_DST_USER="${dst_user}"; _MIG_DST_LAYOUT="${_dst_layout}"; _MIG_STOPPED=1
   echo -e "  Stopping local node ${dst_user}..."
   if [[ "${_dst_layout}" = "canonical" ]]; then
     sudo systemctl stop "xeqmnode_${dst_user}" 2>/dev/null || true
@@ -405,6 +406,7 @@ server_migrate_run() {
   else
     sudo -H -u "${dst_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
   fi
+  _MIG_STOPPED=0   # dest is running again; EXIT trap no longer needs to restart it
 
   # Verify pubkey (retry for up to 30s while daemon initialises)
   echo -e "  Waiting for daemon to report pubkey..."
@@ -452,6 +454,18 @@ server_migrate_run() {
 
 server_migrate_finally() {
   result=$?
+  # If we aborted after stopping the destination node but before it was started
+  # again, restart it — otherwise a registered node is left DOWN (decommission /
+  # stake risk). _MIG_STOPPED is set when the dest is stopped and cleared once it
+  # is confirmed started.
+  if [[ "${result}" -ne 0 && "${_MIG_STOPPED:-0}" -eq 1 && -n "${_MIG_DST_USER:-}" ]]; then
+    echo -e "\n\033[0;33mMigration aborted — restarting destination node '${_MIG_DST_USER}' so it is not left down...\033[0m"
+    if [[ "${_MIG_DST_LAYOUT:-canonical}" = "canonical" ]]; then
+      sudo systemctl start "xeqmnode_${_MIG_DST_USER}" 2>/dev/null || true
+    else
+      sudo -H -u "${_MIG_DST_USER}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start' 2>/dev/null || true
+    fi
+  fi
   echo ""
   exit ${result}
 }
