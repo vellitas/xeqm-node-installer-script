@@ -688,6 +688,14 @@ install_binary_to_opt() {
     rm -rf "$(dirname "${bins_path}")"
   elif [[ -n "${binary_source}" && -x "${binary_source}/xeqm-d" ]]; then
     local _bin _bname
+    # If the copy source IS this host's own bin dir (adding a node on a host that
+    # already runs xeqm), the binaries are already installed and symlinked, and
+    # copying them would be cp'ing files onto themselves ("are the same file").
+    # Nothing to do — leave the existing install in place.
+    if [[ "$(readlink -f "${binary_source}")" = "$(readlink -f "${opt_bin}")" ]]; then
+      echo -e "\n  Binary source is this host's own ${opt_bin} — already installed, skipping copy."
+      return 0
+    fi
     ${_SUDO} cp "${binary_source}/xeqm-d" "${versioned_bin}"
     ${_SUDO} chmod 755 "${versioned_bin}"
     for _bin in "${binary_source}"/*; do
