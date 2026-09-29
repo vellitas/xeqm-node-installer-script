@@ -1286,9 +1286,9 @@ install_dependencies() {
 
   if ! [[ -x "$(command -v ss)" && -x "$(command -v openssl)" && -x "$(command -v natsort)" && \
           -x "$(command -v grep)" && -x "$(command -v getopt)" && -x "$(command -v gawk)" && \
-          -x "$(command -v whiptail)" && -x "$(command -v rsync)" ]]; then
+          -x "$(command -v whiptail)" && -x "$(command -v rsync)" && -x "$(command -v file)" ]]; then
     echo -e "\n\033[1mFixing required dependencies....\033[0m"
-    sudo apt -y install iproute2 openssl python3-natsort grep util-linux gawk whiptail rsync
+    sudo apt -y install iproute2 openssl python3-natsort grep util-linux gawk whiptail rsync file
   fi
 }
 
