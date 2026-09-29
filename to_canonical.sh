@@ -302,6 +302,17 @@ migrate_one_node() {
 
   sudo chown -R xeqm:xeqm "${data_dir}"
 
+  # Assert the identity key made it into the data dir BEFORE starting. If the key
+  # copy silently failed (e.g. ENOSPC after the big lmdb copy), the daemon would
+  # start and generate a BRAND-NEW key — the registered identity goes offline
+  # under a fresh key -> decommission. Refuse to start without the real key.
+  if ! sudo test -s "${data_dir}/key_ed25519"; then
+    echo -e "\n\033[0;31m[FAIL]\033[0m ${target_snode}: key_ed25519 missing/empty in ${data_dir} after copy." >&2
+    echo -e "  Refusing to start (would generate a new identity and lose the registered one)." >&2
+    echo -e "  The original keys are still under the node's home dir — restore them and retry." >&2
+    return 1
+  fi
+
   echo -e "  Writing canonical unit (in-place)..."
   write_canonical_unit "${target_snode}" "${p2p}" "${rpc}" "${qnet}" "${public_ip}" ""
 

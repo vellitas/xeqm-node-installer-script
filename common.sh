@@ -742,26 +742,28 @@ install_binary_to_opt() {
     exit 1
   fi
 
-  ${_SUDO} ln -sf "${versioned_bin}" "${symlink}"
-
-  # Verify binary executes on this CPU — catches SIGILL from AVX2/AVX-512 incompatibility
-  # before any service nodes are installed.
+  # Verify the binary executes on this CPU BEFORE repointing the shared symlink.
+  # /opt/xeqm/bin/xeqm-d is the ExecStart of EVERY node; if we repointed it and
+  # then removed it on a bad binary, all running nodes would fail to exec on their
+  # next restart. So test the versioned binary directly and leave the existing
+  # symlink untouched on failure.
   if [[ "${OS_TYPE}" != "Darwin" ]]; then
     local _test_rc=0
-    timeout 5 "${symlink}" --version >/dev/null 2>&1 || _test_rc=$?
+    timeout 5 "${versioned_bin}" --version >/dev/null 2>&1 || _test_rc=$?
     if [[ "${_test_rc}" -eq 132 ]]; then
-      ${_SUDO} rm -f "${versioned_bin}" 2>/dev/null || true
-      ${_SUDO} rm -f "${symlink}" 2>/dev/null || true
+      ${_SUDO} rm -f "${versioned_bin}" 2>/dev/null || true   # leave existing symlink + nodes intact
       local _cpu_model
       _cpu_model="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || echo 'unknown')"
       echo -e "\n\033[0;31merror\033[0m: The binary is not compatible with this CPU (SIGILL — illegal instruction)." >&2
       echo -e "  CPU: ${_cpu_model}" >&2
       echo -e "  The prebuilt release requires CPU extensions (e.g. AVX2) that this processor lacks." >&2
-      echo -e "  Compile from source on this machine:" >&2
+      echo -e "  Existing installation left UNCHANGED. Compile from source on this machine:" >&2
       echo -e "    sudo bash install.sh --binary-source compile" >&2
       exit 1
     fi
   fi
+
+  ${_SUDO} ln -sf "${versioned_bin}" "${symlink}"
 
   echo -e "\n  \033[1;32mBinary installed:\033[0m ${versioned_bin}"
   echo -e "  \033[1;32mSymlink updated:\033[0m  ${symlink} -> ${versioned_bin}"
@@ -881,9 +883,14 @@ compile_binary_to_opt() {
     # Patch LocalLibzmq.cmake to pass the flag explicitly.
     local _lzmq="external/oxen-mq/cmake/local-libzmq/LocalLibzmq.cmake"
     if [[ -f "${_lzmq}" ]]; then
-      sed -i '' \
-        's/CMAKE_ARGS \${libzmq_compiler_args}/CMAKE_ARGS ${libzmq_compiler_args} -DCMAKE_POLICY_VERSION_MINIMUM=3.5/' \
-        "${_lzmq}" || true
+      # sed -i takes an arg on BSD/macOS ('') but NOT on GNU/Linux, where the
+      # compile actually runs — the BSD form silently no-ops on Linux, leaving
+      # the patch unapplied and the build failing under cmake 4.x.
+      if [[ "${OS_TYPE}" == "Darwin" ]]; then
+        sed -i '' 's/CMAKE_ARGS \${libzmq_compiler_args}/CMAKE_ARGS ${libzmq_compiler_args} -DCMAKE_POLICY_VERSION_MINIMUM=3.5/' "${_lzmq}" || true
+      else
+        sed -i 's/CMAKE_ARGS \${libzmq_compiler_args}/CMAKE_ARGS ${libzmq_compiler_args} -DCMAKE_POLICY_VERSION_MINIMUM=3.5/' "${_lzmq}" || true
+      fi
       echo "  patched LocalLibzmq.cmake for cmake 4.x" >&2
     fi
     mkdir -p build && cd build
@@ -1283,7 +1290,7 @@ install_dependencies() {
     # BSD grep lacks -P (PCRE); install GNU grep which the scripts use heavily
     grep -P '' /dev/null 2>/dev/null || _missing+=(grep)
     # BSD getopt lacks --long; install GNU getopt (gnu-getopt formula)
-    getopt --test 2>/dev/null; [[ $? -ne 4 ]] && _missing+=(gnu-getopt)
+    local _grc=0; getopt --test >/dev/null 2>&1 || _grc=$?; [[ "${_grc}" -ne 4 ]] && _missing+=(gnu-getopt)
     if [[ ${#_missing[@]} -gt 0 ]]; then
       echo -e "\n\033[1mInstalling missing dependencies via Homebrew: ${_missing[*]}\033[0m"
       HOMEBREW_NO_REQUIRE_TAP_TRUST=1 HOMEBREW_NO_AUTO_UPDATE=1 \

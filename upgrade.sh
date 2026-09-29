@@ -271,7 +271,7 @@ upgrade_canonical_nodes() {
     tput rev 2>/dev/null || true; echo -e "\n\033[1m ${snode_name} \033[0m"; tput sgr0 2>/dev/null || true
     svc_stop "${snode_name}" || true
     sleep 2
-    svc_start "${snode_name}"
+    svc_start "${snode_name}" || echo -e "  \033[0;31mWARN: ${snode_name} start failed (DOWN)\033[0m"
     echo -e "  \033[1;32mRestarted\033[0m ${snode_name}"
   done
 
@@ -344,7 +344,8 @@ upgrade_installer_nodes() {
     sudo chown -R "${username}:${username}" "${target_dir}"
 
     sudo -H -u "${username}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh setup_service'
-    sudo -H -u "${username}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
+    sudo -H -u "${username}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start' \
+      || echo -e "  \033[0;31mWARN: ${username} failed to start (DOWN) — check journalctl\033[0m"
 
     if [[ "${config[open_firewall]:-0}" -eq 1 ]]; then
       sudo -H -u "${username}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh open_firewall'
