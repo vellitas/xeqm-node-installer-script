@@ -382,12 +382,25 @@ server_migrate_run() {
   fi
   rm -f "${tmp_ed}" "${tmp_bls}"
 
+  # The identity has moved to the destination. Stop the SOURCE daemon now so (a)
+  # a blockchain rsync captures a consistent LMDB instead of a torn live one, and
+  # (b) the source stops broadcasting uptime proofs under the key we just pulled —
+  # two live daemons on one key get the node decommissioned/deregistered (stake
+  # risk). It is intentionally left stopped: its identity now lives on the dest.
+  echo -e "  Stopping SOURCE node '${src_node_user}' on ${src_host} (its identity has moved)..."
+  # shellcheck disable=SC2029,SC2086
+  if [[ "${src_layout}" = "canonical" ]]; then
+    ssh ${ssh_opts} "${src_ssh_user}@${src_host}" "sudo systemctl stop xeqmnode_${src_node_user}.service" 2>/dev/null || true
+  else
+    ssh ${ssh_opts} "${src_ssh_user}@${src_host}" "sudo -H -u ${src_node_user} bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop'" 2>/dev/null || true
+  fi
+
   # Optionally copy blockchain via rsync
   if [[ "${copy_chain}" -eq 1 ]]; then
     echo -e "  Copying blockchain from source (may take several minutes)..."
     sudo mkdir -p "${dst_data_dir}/lmdb"
     local rsync_ssh="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -p ${src_ssh_port}"
-    if sudo rsync -a --info=progress2 \
+    if sudo rsync -a --delete --info=progress2 \
       --rsync-path="sudo rsync" \
       -e "${rsync_ssh}" \
       "${src_ssh_user}@${src_host}:${src_data_dir}/lmdb/" \
