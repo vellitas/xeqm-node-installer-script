@@ -800,7 +800,19 @@ _copy_chain_state() {
   if [[ -d "${dst}/lmdb" ]]; then
     ${_SUDO} mv "${dst}/lmdb" "${dst}/lmdb_$(printf '%08x' $RANDOM)"
   fi
-  [[ -d "${src}/lmdb" ]] && ${_SUDO} cp -R "${src}/lmdb" "${dst}/" || true
+  # The source daemon may be running, so a plain `cp -R` of its LMDB yields a
+  # torn/inconsistent copy. Use xeqm-mdb_copy -c (consistent live copy) when
+  # available; fall back to cp -R only if the tool is missing.
+  if [[ -d "${src}/lmdb" ]]; then
+    if [[ -x /opt/xeqm/bin/xeqm-mdb_copy ]]; then
+      ${_SUDO} mkdir -p "${dst}/lmdb"
+      if ! ${_SUDO} /opt/xeqm/bin/xeqm-mdb_copy -c "${src}/lmdb" "${dst}/lmdb" 2>/dev/null; then
+        ${_SUDO} rm -rf "${dst}/lmdb"; ${_SUDO} cp -R "${src}/lmdb" "${dst}/" || true
+      fi
+    else
+      ${_SUDO} cp -R "${src}/lmdb" "${dst}/" || true
+    fi
+  fi
   for _db in sqlite.db ons.db; do
     for _sfx in "" "-shm" "-wal"; do
       if [[ -f "${src}/${_db}${_sfx}" ]]; then
