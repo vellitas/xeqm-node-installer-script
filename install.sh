@@ -813,12 +813,19 @@ _copy_chain_state() {
       ${_SUDO} cp -R "${src}/lmdb" "${dst}/" || true
     fi
   fi
+  # sqlite.db/ons.db may be mid-write on a running source; a plain cp of the file
+  # (plus -shm/-wal) yields a torn DB the daemon can reject. Use sqlite3's online
+  # .backup when available (consistent even from a live DB); otherwise SKIP them —
+  # the daemon rebuilds the SN list from the (consistent) LMDB on first start (a
+  # one-time scan). Never copy a torn DB.
   for _db in sqlite.db ons.db; do
-    for _sfx in "" "-shm" "-wal"; do
-      if [[ -f "${src}/${_db}${_sfx}" ]]; then
-        ${_SUDO} cp "${src}/${_db}${_sfx}" "${dst}/${_db}${_sfx}"
-      fi
-    done
+    [[ -f "${src}/${_db}" ]] || continue
+    if command -v sqlite3 >/dev/null 2>&1; then
+      ${_SUDO} sqlite3 "${src}/${_db}" ".backup '${dst}/${_db}'" 2>/dev/null \
+        || echo "  note: ${_db} online-backup failed — daemon will rebuild it from the blockchain"
+    else
+      echo "  note: skipping ${_db} (sqlite3 not installed) — daemon will rebuild it from the blockchain"
+    fi
   done
   [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R xeqm:xeqm "${dst}" || true
 }
