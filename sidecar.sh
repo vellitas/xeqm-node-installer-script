@@ -230,7 +230,7 @@ CFG
   chmod 640 "$cfg" "$key" 2>/dev/null || true
   if ARC_ORACLE_PASSPHRASE="$pass" "$BIN" --enroll --config "$cfg" >"/tmp/exiom-enroll-$name.log" 2>&1; then
     chown root:"$USER" "$cfg"; chmod 640 "$cfg"
-    systemctl enable --now "exiom-oracle@$name" >/dev/null 2>&1
+    systemctl enable --now "exiom-oracle@$name" >/dev/null 2>&1 || echo "    could not enable exiom-oracle@$name (continuing)"
     echo "    ✓ enrolled and started (exiom-oracle@$name)"
   else
     echo "    ✗ enrollment failed — see /tmp/exiom-enroll-$name.log"

@@ -53,7 +53,7 @@ if systemctl cat arc-oracle.service >/dev/null 2>&1 && [ -f "$OLD_DIR/config.tom
   if is_mainnet "$OLD_DIR/config.toml"; then
     ensure_common
     echo "migrating arc-oracle.service (config.toml) ..."
-    systemctl stop arc-oracle.service || true
+    systemctl disable --now arc-oracle.service || true
     move_cfg config
     [ -f "$OLD_DIR/arc-oracle.env" ] && { cp -a "$OLD_DIR/arc-oracle.env" "$NEW_DIR/exiom-oracle.env"; }
     # Preserve the host's hardened unit; just rewrite the identifiers/paths.
@@ -109,7 +109,7 @@ SVC
     systemctl daemon-reload; NEED_TEMPLATE=0
   fi
   echo "migrating arc-oracle@$node ..."
-  systemctl stop "arc-oracle@$node" || true
+  systemctl disable --now "arc-oracle@$node" || true
   move_cfg "$node"
   systemctl enable --now "exiom-oracle@$node"
   sleep 3

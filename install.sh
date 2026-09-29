@@ -359,7 +359,7 @@ copy_binaries_option_handler() {
   local option_value="$1"
 
   if [[ -f "${option_value}/xeqm-d" ]]; then
-      binaries_version="$("${option_value}"/xeqm-d --version | grep -oP '(?<=\()+v[0-9.]+')"
+      binaries_version="$("${option_value}"/xeqm-d --version | grep -oP '(?<=\()+v[0-9.]+' || true)"
 
       if [[ "${command_options_set[version]}" -eq 1 && "${config[install_version]}" != "${binaries_version}" ]]; then
         echo -e "\n\033[0;33merror: ${option_value}/xeqm-d version '${binaries_version}' does not match version '${config[install_version]}'\033[0m\n"
