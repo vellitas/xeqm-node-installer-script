@@ -273,8 +273,18 @@ _calculate_max_nodes() {
   _max_by_disk=$(( (_free_disk_mb - 5120) / 1536 ))
   _max_by_cpu="${_ghz_cores}"
 
-  [[ "${_max_by_ram}"  -lt 1 ]] && _max_by_ram=1
-  [[ "${_max_by_disk}" -lt 1 ]] && _max_by_disk=1
+  # These are TOTAL capacity. Subtract already-installed service nodes so the
+  # numbers represent ADDITIONAL capacity (floor at 0 — a full box offers 0 more).
+  local _existing_nodes
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    _existing_nodes="$(find "${XEQM_SVC_DIR}" -maxdepth 1 -name "${XEQM_SVC_LABEL_PREFIX}.snode*.plist" 2>/dev/null | wc -l | tr -d ' ')"
+  else
+    _existing_nodes="$(systemctl list-units 'xeqmnode_snode*.service' --all --no-pager --no-legend 2>/dev/null | wc -l)"
+  fi
+  [[ "${_existing_nodes}" =~ ^[0-9]+$ ]] || _existing_nodes=0
+  _max_by_ram=$((  _max_by_ram  - _existing_nodes )); [[ "${_max_by_ram}"  -lt 0 ]] && _max_by_ram=0
+  _max_by_disk=$(( _max_by_disk - _existing_nodes )); [[ "${_max_by_disk}" -lt 0 ]] && _max_by_disk=0
+  _max_by_cpu=$((  _max_by_cpu  - _existing_nodes )); [[ "${_max_by_cpu}"  -lt 0 ]] && _max_by_cpu=0
 
   _max_nodes="${_max_by_ram}"
   _limit_reason="RAM"
@@ -1549,8 +1559,8 @@ wz_nodes() {
 
   while true; do
     wt_inputbox "Service Nodes" \
-      "How many ${_prompt_verb} would you like to install?\n\nThis server supports up to ${_max} more node(s) based on ${_reason}.\n(${_detail})${_existing_note}\n\nLeave blank to default to 1:" \
-      17 66 _val ""
+      "How many ${_prompt_verb} would you like to install?\n\nThis server supports up to ${_max} more node(s) based on ${_reason}.\n(${_detail})${_existing_note}\n\nHardware estimate only — it does NOT capture per-IP peering limits.\nStacking many nodes behind one IP hurts peering and concentrates\nrisk; prefer spreading nodes across hosts.\n\nLeave blank to default to 1:" \
+      20 70 _val ""
     local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
     _val="${_val:-1}"
     if [[ "${_val}" =~ ^[0-9]+$ && "${_val}" -ge 1 && \
