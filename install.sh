@@ -241,6 +241,32 @@ validate_parsed_command_line_args() {
   validate_command_line_option_combinations valid_option_combinations
 }
 
+# Hidden capacity-cap override. The secret key is NOT stored in this (public)
+# repo — it is read from $XEQM_NODE_OVERRIDE_KEY, or the first line of
+# /etc/xeqm/override.key (create it: `sudo install -m600 /dev/stdin
+# /etc/xeqm/override.key <<<'your-secret'`). With a key set, typing "<key> <N>"
+# in the node-count field installs N nodes regardless of the hardware estimate.
+# No key configured => override disabled and the cap is enforced as normal.
+_node_override_key() {
+  if [[ -n "${XEQM_NODE_OVERRIDE_KEY:-}" ]]; then
+    printf '%s' "${XEQM_NODE_OVERRIDE_KEY}"
+  elif [[ -r /etc/xeqm/override.key ]]; then
+    head -n1 /etc/xeqm/override.key 2>/dev/null | tr -d '[:space:]'
+  fi
+}
+
+# Given raw prompt input, echo the override node count when the input is
+# "<secret key> <N>" (N>=1) and the key matches; otherwise echo nothing.
+_node_override_count() {
+  local raw="$1" key n
+  key="$(_node_override_key)"
+  [[ -z "${key}" ]] && return 0
+  if [[ "${raw}" == "${key} "* ]]; then
+    n="${raw#"${key}" }"; n="${n//[[:space:]]/}"
+    [[ "${n}" =~ ^[0-9]+$ && "${n}" -ge 1 ]] && printf '%s' "${n}"
+  fi
+}
+
 # Canonical-layout capacity formula:
 #   RAM: 600 MB/node (peak quorum load, not idle RSS), 1.5 GB system reserve
 #   Disk: 1.5 GB/node, 5 GB system reserve
@@ -309,6 +335,13 @@ prompt_nodes_count() {
   while true; do
     read -rp $'\n\033[1mHow many service nodes would you like to install?\e[0m [1]: ' count
     count="${count:-1}"
+    # Hidden override: "<secret key> <N>" bypasses the capacity cap.
+    local _ovr; _ovr="$(_node_override_count "${count}")"
+    if [[ -n "${_ovr}" ]]; then
+      echo -e "  \033[0;33mOverride key accepted — installing ${_ovr} node(s) (capacity cap bypassed).\033[0m"
+      nodes_option_handler "${_ovr}"
+      return 0
+    fi
     if ! [[ "${count}" =~ ^[0-9]+$ && "${count}" -ge 1 ]]; then
       echo -e "  \033[0;33mPlease enter a number between 1 and ${max_nodes}.\033[0m"
       continue
@@ -1582,6 +1615,12 @@ wz_nodes() {
       20 70 _val ""
     local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
     _val="${_val:-1}"
+    # Hidden override: "<secret key> <N>" bypasses the capacity cap.
+    local _ovr; _ovr="$(_node_override_count "${_val}")"
+    if [[ -n "${_ovr}" ]]; then
+      nodes_option_handler "${_ovr}"
+      return 0
+    fi
     if [[ "${_val}" =~ ^[0-9]+$ && "${_val}" -ge 1 && \
           ( "${_val}" -le "${_max}" || "${config[force_install]:-0}" -eq 1 ) ]]; then
       nodes_option_handler "${_val}"
