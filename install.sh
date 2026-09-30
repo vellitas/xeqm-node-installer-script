@@ -339,6 +339,7 @@ prompt_nodes_count() {
     local _ovr; _ovr="$(_node_override_count "${count}")"
     if [[ -n "${_ovr}" ]]; then
       echo -e "  \033[0;33mOverride key accepted — installing ${_ovr} node(s) (capacity cap bypassed).\033[0m"
+      config[nodes_override]=1
       nodes_option_handler "${_ovr}"
       return 0
     fi
@@ -366,7 +367,7 @@ nodes_option_handler() {
   _calculate_max_nodes
   local max_nodes="${_max_nodes}"
 
-  if [[ "$1" -gt "${max_nodes}" && "${config[force_install]:-0}" -ne 1 ]]; then
+  if [[ "$1" -gt "${max_nodes}" && "${config[force_install]:-0}" -ne 1 && "${config[nodes_override]:-0}" -ne 1 ]]; then
     echo -e "\033[0;33merror: Too many nodes set as --nodes option value. Max nodes: ${max_nodes}. Check system specifications (memory/disk space).\033[0m\n"
     exit 1
   fi
@@ -1615,9 +1616,11 @@ wz_nodes() {
       20 70 _val ""
     local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
     _val="${_val:-1}"
-    # Hidden override: "<secret key> <N>" bypasses the capacity cap.
+    # Hidden override: "<secret key> <N>" bypasses the capacity cap. Set
+    # nodes_override so nodes_option_handler's own cap check also passes.
     local _ovr; _ovr="$(_node_override_count "${_val}")"
     if [[ -n "${_ovr}" ]]; then
+      config[nodes_override]=1
       nodes_option_handler "${_ovr}"
       return 0
     fi
