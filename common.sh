@@ -537,9 +537,9 @@ svc_plist_path() { echo "${XEQM_SVC_DIR}/$(svc_label "${1}").plist"; }
 # touching that port number — this took down a live registered node.
 _listener_pids() {
   if command -v ss >/dev/null 2>&1; then
-    ss -tulnpH "sport = :${1}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' '
+    ss -tulnpH "sport = :${1}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' ' || true
   else
-    lsof -ti ":${1}" -sTCP:LISTEN 2>/dev/null | tr '\n' ' '
+    lsof -ti ":${1}" -sTCP:LISTEN 2>/dev/null | tr '\n' ' ' || true
   fi
 }
 
