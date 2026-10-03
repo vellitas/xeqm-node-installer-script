@@ -127,6 +127,25 @@ _fmt_ram() {
   else echo "—"; fi
 }
 
+
+_report_no_service_nodes() {
+  echo -e "\n\033[1;32m\xe2\x9c\x93 Health check complete.\033[0m"
+  echo -e "  No XEQM service-node units (xeqmnode_*) are installed on this host, so there are"
+  echo -e "  no service nodes to diagnose. This is normal for a pubnode- or seed-only host."
+  local _svc _found=0 _h
+  for _svc in xeqm-pubnode xeqm-seed; do
+    if systemctl is-active --quiet "${_svc}.service" 2>/dev/null; then
+      _found=1
+      _h="$(curl -s -m4 -X POST http://127.0.0.1:9231/json_rpc -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":0,"method":"get_info"}' 2>/dev/null \
+            | grep -oE '"height":[0-9]+' | head -1 | cut -d: -f2 || true)"
+      echo -e "  This host runs \033[1m${_svc}\033[0m \xe2\x80\x94 \033[0;32mactive\033[0m${_h:+ (height ${_h})}"
+    fi
+  done
+  [[ "${_found}" -eq 0 ]] && echo -e "  (No pubnode or seed daemon detected on this host either.)"
+  [[ -t 0 ]] && read -rp $'\n  Press Enter to return to the menu...' _ || true
+}
+
 analyze_and_fix() {
   # ── Discover all xeqmnode_*.service units (running or stopped) ───────────
   # Using --all so stopped/failed nodes appear in the table instead of being invisible.
@@ -147,7 +166,7 @@ analyze_and_fix() {
   fi
 
   if [[ "${#all_unit_names[@]}" -eq 0 ]]; then
-    echo -e "\n\033[0;33mNo XEQM service node units found on this server.\033[0m"
+    _report_no_service_nodes
     exit 0
   fi
 
@@ -217,7 +236,7 @@ analyze_and_fix() {
   done
 
   if [[ "${#node_names[@]}" -eq 0 ]]; then
-    echo -e "\n\033[0;33mNo XEQM service node units found.\033[0m"
+    _report_no_service_nodes
     exit 0
   fi
 
