@@ -338,13 +338,17 @@ prompt_menu() {
 
   local pm__input
   while true; do
-    read -rp "  Choice [${default}]: " pm__input
+    read -rp "  Choice [${default}] (q to quit): " pm__input
     pm__input="${pm__input:-${default}}"
+    if [[ "${pm__input}" =~ ^[Qq]$ || "${pm__input}" == "quit" ]]; then
+      echo -e "\n  Installation cancelled."
+      exit 0
+    fi
     if [[ "${pm__input}" =~ ^[0-9]+$ && "${pm__input}" -ge 1 && "${pm__input}" -le "${#options[@]}" ]]; then
       pm__result="${pm__input}"
       return 0
     fi
-    echo -e "  \033[0;33mPlease enter a number between 1 and ${#options[@]}\033[0m"
+    echo -e "  \033[0;33mPlease enter a number between 1 and ${#options[@]}, or q to quit\033[0m"
   done
 }
 
@@ -488,24 +492,55 @@ find_existing_binaries_on_server() {
 
 # ── Canonical layout helpers ─────────────────────────────────────────────────
 
+# True when snode<n> has neither a data dir nor a service unit — i.e. the slot is free.
+_snode_slot_free() {
+  local n="$1"
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    [[ ! -d "${XEQM_STATE_BASE}/snode${n}" ]] && \
+      ! launchctl list 2>/dev/null | awk '{print $3}' | grep -qF "$(svc_label "snode${n}")"
+  else
+    [[ ! -d "/var/lib/xeqm/snode${n}" ]] && \
+      ! systemctl cat "xeqmnode_snode${n}.service" >/dev/null 2>&1
+  fi
+}
+
+# First free snode slot (gap-aware). Kept for single-slot callers.
 next_snode_slot() {
   local n=1
   while [[ "${n}" -le 200 ]]; do
-    if [[ "${OS_TYPE}" == "Darwin" ]]; then
-      if [[ ! -d "${XEQM_STATE_BASE}/snode${n}" ]] && \
-         ! launchctl list 2>/dev/null | awk '{print $3}' | grep -qF "$(svc_label "snode${n}")"; then
-        echo "${n}"; return 0
-      fi
-    else
-      if [[ ! -d "/var/lib/xeqm/snode${n}" ]] && \
-         ! systemctl cat "xeqmnode_snode${n}.service" >/dev/null 2>&1; then
-        echo "${n}"; return 0
-      fi
-    fi
+    _snode_slot_free "${n}" && { echo "${n}"; return 0; }
     n=$(( n + 1 ))
   done
   echo -e "\033[0;31merror\033[0m: Could not find a free snode slot (checked snode1–snode200). Check for corrupted state." >&2
   return 1
+}
+
+# Echo the first <count> FREE snode slots (gap-aware), space-separated.
+# Multi-node installs MUST use this so an existing node — e.g. a staked committee
+# node parked at snode3 while snode1/2 are empty — is skipped, never overwritten.
+free_snode_slots() {
+  local want="$1" n=1 found=0 out=""
+  while [[ "${n}" -le 200 && "${found}" -lt "${want}" ]]; do
+    if _snode_slot_free "${n}"; then
+      out+="${out:+ }${n}"; found=$(( found + 1 ))
+    fi
+    n=$(( n + 1 ))
+  done
+  if [[ "${found}" -lt "${want}" ]]; then
+    echo -e "\033[0;31merror\033[0m: Only ${found} free snode slot(s) of ${want} requested (checked snode1–snode200)." >&2
+    return 1
+  fi
+  echo "${out}"
+}
+
+# Echo the OCCUPIED snode slots (gap-aware), space-separated; empty when none.
+existing_snode_slots() {
+  local n=1 out=""
+  while [[ "${n}" -le 200 ]]; do
+    _snode_slot_free "${n}" || out+="${out:+ }${n}"
+    n=$(( n + 1 ))
+  done
+  echo "${out}"
 }
 
 ensure_xeqm_user() {

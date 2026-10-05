@@ -100,15 +100,13 @@ install_run() {
   install_dependencies
   [[ "${XEQM_FROM_MENU:-0}" != "1" ]] && print_splash_screen "Service Node Installer" "${xeqmnode_installer_version}"
 
-  local _start_slot
-  _start_slot="$(next_snode_slot)"
   if [[ "${XEQM_FROM_MENU:-0}" != "1" ]]; then
-    if [[ "${_start_slot}" -eq 1 ]]; then
+    local _existing; _existing="$(existing_snode_slots)"
+    if [[ -z "${_existing}" ]]; then
       echo -e "\n  No existing service nodes found — fresh install."
     else
-      local _last=$(( _start_slot - 1 ))
-      echo -e "\n  Existing: \033[1msnode1..snode${_last}\033[0m"
-      echo -e "  Next node will be: \033[1;36msnode${_start_slot}\033[0m"
+      echo -e "\n  Existing service nodes: \033[1msnode${_existing// /, snode}\033[0m"
+      echo -e "  New nodes take the next free slots; existing nodes are never touched."
     fi
   fi
 
@@ -664,8 +662,10 @@ pre_install_summary() {
   echo -e "\033[1;36m  ╚${border}╝\033[0m"
   echo ""
 
-  local _start_slot
-  _start_slot="$(next_snode_slot)"
+  local -a _slot_arr
+  if ! read -ra _slot_arr <<< "$(free_snode_slots "${config[nodes]}")"; then
+    echo -e "\n\033[0;31mNot enough free snode slots for ${config[nodes]} node(s).\033[0m"; exit 1
+  fi
 
   printf "  %-24s %s\n" "Nodes:"         "${config[nodes]}"
   printf "  %-24s %s\n" "Binary version:" "${config[install_version]}"
@@ -695,7 +695,7 @@ pre_install_summary() {
 
   local idx=1
   while [ "${idx}" -le "${config[nodes]}" ]; do
-    local _slot=$(( _start_slot + idx - 1 ))
+    local _slot="${_slot_arr[idx-1]}"
     printf "  Node %-3s  snode=%-12s  p2p=%-6s  rpc=%-6s  quorumnet=%s\n" \
       "${idx}:" "snode${_slot}" \
       "${config["snode${idx}__p2p_bind_port"]}" \
@@ -720,8 +720,10 @@ pre_install_summary() {
 install_manager() {
   declare -A node_config
   local idx=1
-  local start_slot
-  start_slot="$(next_snode_slot)"
+  local -a slot_arr
+  if ! read -ra slot_arr <<< "$(free_snode_slots "${config[nodes]}")"; then
+    echo -e "\n\033[0;31mAborting: not enough free snode slots for ${config[nodes]} node(s).\033[0m"; exit 1
+  fi
   local snode1_data_dir=
 
   ensure_xeqm_user
@@ -730,7 +732,7 @@ install_manager() {
   install_binary_to_opt
 
   while [ "${idx}" -le "${config[nodes]}" ]; do
-    local snode_name="snode$(( start_slot + idx - 1 ))"
+    local snode_name="snode${slot_arr[idx-1]}"
     local data_dir="${XEQM_STATE_BASE}/${snode_name}"
     generate_node_config node_config "${idx}" "${snode_name}" "${data_dir}"
 
