@@ -533,6 +533,21 @@ free_snode_slots() {
   echo "${out}"
 }
 
+# The N snode slots this install run will use, computed ONCE and cached for the
+# whole run (config[planned_slots]). Every pre- and post-install display reads this
+# so the summary, the confirm screen, the key-backup list and the created units all
+# name the SAME slots — and a post-install recompute (when the new slots are no
+# longer free) can't disagree. Gap-aware: skips occupied slots (e.g. a staked
+# snode3), so 3 nodes on a snode3-only host are snode1, snode2, snode4.
+ensure_planned_slots() {
+  # Must run in the PARENT shell (as a statement, never in $(...)) so the write to
+  # the global config array persists — that is what lets the pre-install summary and
+  # the post-install key-backup list name the same slots. Callers then read
+  # "${config[planned_slots]}" directly.
+  [[ -n "${config[planned_slots]:-}" ]] && return 0
+  config[planned_slots]="$(free_snode_slots "${config[nodes]}")"
+}
+
 # Echo the OCCUPIED snode slots (gap-aware), space-separated; empty when none.
 existing_snode_slots() {
   local n=1 out=""
