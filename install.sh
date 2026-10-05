@@ -663,7 +663,7 @@ pre_install_summary() {
   echo ""
 
   local -a _slot_arr
-  if ! read -ra _slot_arr <<< "$(free_snode_slots "${config[nodes]}")"; then
+  if ! ensure_planned_slots; read -ra _slot_arr <<< "${config[planned_slots]}"; then
     echo -e "\n\033[0;31mNot enough free snode slots for ${config[nodes]} node(s).\033[0m"; exit 1
   fi
 
@@ -721,7 +721,8 @@ install_manager() {
   declare -A node_config
   local idx=1
   local -a slot_arr
-  if ! read -ra slot_arr <<< "$(free_snode_slots "${config[nodes]}")"; then
+  ensure_planned_slots
+  if ! read -ra slot_arr <<< "${config[planned_slots]}" || [[ "${#slot_arr[@]}" -lt "${config[nodes]}" ]]; then
     echo -e "\n\033[0;31mAborting: not enough free snode slots for ${config[nodes]} node(s).\033[0m"; exit 1
   fi
   local snode1_data_dir=
@@ -1546,13 +1547,11 @@ next_steps() {
         "${_sn}:" "${_p2p}" "${_qnet}"
     done < <(printf '%s\n' "${_ns_lines[@]}" | natsort)
   else
-    local start_slot
-    start_slot="$(next_snode_slot)"
+    local -a _slots; ensure_planned_slots; read -ra _slots <<< "${config[planned_slots]}"
     local install_count="${config[nodes]}"
-    local first_slot=$(( start_slot - install_count ))
     local idx=1
     while [ "${idx}" -le "${install_count}" ]; do
-      _sn="snode$(( first_slot + idx - 1 ))"
+      _sn="snode${_slots[idx-1]}"
       printf "       %-14s  p2p %-6s TCP     quorumnet %-6s TCP+UDP\n" \
         "${_sn}:" "${config["snode${idx}__p2p_bind_port"]}" "${config["snode${idx}__quorumnet_port"]}"
       idx=$((idx + 1))
@@ -1561,13 +1560,11 @@ next_steps() {
 
   # [3] Key backup — nodes installed this run only
   echo -e "\n\033[1m  [3]  Back up your service node keys\033[0m  (losing a key = losing the node)\n"
-  local start_slot
-  start_slot="$(next_snode_slot)"
+  local -a _slots; ensure_planned_slots; read -ra _slots <<< "${config[planned_slots]}"
   local install_count="${config[nodes]}"
-  local first_slot=$(( start_slot - install_count ))
   local idx=1
   while [ "${idx}" -le "${install_count}" ]; do
-    _sn="snode$(( first_slot + idx - 1 ))"
+    _sn="snode${_slots[idx-1]}"
     local _rpc="${config["snode${idx}__rpc_bind_port"]}"
     if [[ "${OS_TYPE}" == "Darwin" ]]; then
       echo -e "       \033[1m${XEQM_BIN_DIR}/xeqm-d print_sn_key --rpc-admin=127.0.0.1:${_rpc}\033[0m"
@@ -1618,13 +1615,11 @@ next_steps() {
         entries+=("${_sn} ${_p2p} ${_qnet}")
       done < <(printf '%s\n' "${_ns_lines[@]}" | natsort)
     else
-      local idx=1
-      local start_slot
-      start_slot="$(next_snode_slot)"
+      local -a _slots; ensure_planned_slots; read -ra _slots <<< "${config[planned_slots]}"
       local install_count="${config[nodes]}"
-      local first_slot=$(( start_slot - install_count ))
+      local idx=1
       while [ "${idx}" -le "${install_count}" ]; do
-        _sn="snode$(( first_slot + idx - 1 ))"
+        _sn="snode${_slots[idx-1]}"
         entries+=("${_sn} ${config["snode${idx}__p2p_bind_port"]} ${config["snode${idx}__quorumnet_port"]}")
         idx=$((idx + 1))
       done
@@ -1841,8 +1836,8 @@ wz_detect() {
     return 1
   fi
 
-  local _start_slot
-  _start_slot="$(next_snode_slot)"
+  local -a _slots
+  ensure_planned_slots; read -ra _slots <<< "${config[planned_slots]}"
 
   local _sum
   _sum="Auto-detected configuration for ${config[nodes]} node(s):\n\n"
@@ -1852,7 +1847,7 @@ wz_detect() {
   while [[ ${_i} -le ${config[nodes]} ]]; do
     _sum+="$(printf "%-5s %-14s %-7s %-7s %s\n" \
       "${_i}" \
-      "snode$(( _start_slot + _i - 1 ))" \
+      "snode${_slots[_i-1]}" \
       "${config["snode${_i}__p2p_bind_port"]}" \
       "${config["snode${_i}__rpc_bind_port"]}" \
       "${config["snode${_i}__quorumnet_port"]}")\n"
@@ -1867,15 +1862,18 @@ wz_detect() {
   [[ "${_detect_ht}" -gt 34 ]] && _detect_ht=34
 
   while true; do
-    wt_yesno "Auto-Detected Configuration" "${_sum}" "${_detect_ht}" 72 "Proceed" "Customize Ports"
-    local _rc=$?
-    if [[ ${_rc} -eq 0 ]]; then
-      return 0  # Proceed with auto-detected ports
-    elif [[ ${_rc} -eq 255 ]]; then
-      return 1  # Esc = Back to previous step
-    fi
+    local _detect_choice
+    wt_menu "Auto-Detected Configuration" "${_sum}" "${_detect_ht}" 72 3 _detect_choice \
+      "Proceed"   "Install with these ports" \
+      "Customize" "Change the ports" \
+      "Quit"      "Exit the installer"
+    [[ $? -ne 0 ]] && return 1          # Esc = Back to previous step
+    case "${_detect_choice}" in
+      Proceed) return 0 ;;
+      Quit)    clear; echo -e "\nInstallation cancelled."; exit 0 ;;
+    esac
 
-    # "Customize Ports" selected — choose assignment mode
+    # "Customize" selected — choose assignment mode
     local _port_mode
     wt_menu "Customize Ports" "How would you like to assign ports?" 10 64 2 _port_mode \
       "Stepped"    "Start port + step size  (e.g. start=9270, step=100)" \
@@ -1951,7 +1949,7 @@ wz_detect() {
     while [[ ${_j} -le ${config[nodes]} ]]; do
       _sum+="$(printf "%-5s %-14s %-7s %-7s %s\n" \
         "${_j}" \
-        "snode$(( _start_slot + _j - 1 ))" \
+        "snode${_slots[_j-1]}" \
         "${config["snode${_j}__p2p_bind_port"]}" \
         "${config["snode${_j}__rpc_bind_port"]}" \
         "${config["snode${_j}__quorumnet_port"]}")\n"
@@ -2017,8 +2015,8 @@ wz_agent() {
 }
 
 wz_confirm() {
-  local _start_slot
-  _start_slot="$(next_snode_slot)"
+  local -a _slots
+  ensure_planned_slots; read -ra _slots <<< "${config[planned_slots]}"
 
   local _sum="Ready to install ${config[nodes]} XEQM service node(s).\n\n"
 
@@ -2052,7 +2050,7 @@ wz_confirm() {
   while [[ ${_i} -le ${config[nodes]} ]]; do
     _sum+="$(printf "%-5s %-14s %-7s %s\n" \
       "${_i}" \
-      "snode$(( _start_slot + _i - 1 ))" \
+      "snode${_slots[_i-1]}" \
       "${config["snode${_i}__p2p_bind_port"]}" \
       "${config["snode${_i}__quorumnet_port"]}")\n"
     _i=$((_i + 1))
@@ -2062,8 +2060,18 @@ wz_confirm() {
   local _confirm_ht=$(( config[nodes] + 19 ))
   [[ "${_confirm_ht}" -lt 20 ]] && _confirm_ht=20
   [[ "${_confirm_ht}" -gt 36 ]] && _confirm_ht=36
-  wt_yesno "Confirm Installation" "${_sum}" "${_confirm_ht}" 72 "Install" "Back"
-  return $?
+  local _confirm_choice
+  wt_menu "Confirm Installation" "${_sum}" "${_confirm_ht}" 72 3 _confirm_choice \
+    "Install" "Begin installation (not reversible)" \
+    "Back"    "Return to the previous step" \
+    "Quit"    "Exit the installer"
+  [[ $? -ne 0 ]] && return 1            # Esc = Back
+  case "${_confirm_choice}" in
+    Install) return 0 ;;
+    Back)    return 1 ;;
+    Quit)    clear; echo -e "\nInstallation cancelled."; exit 0 ;;
+  esac
+  return 1
 }
 
 run_wizard() {
