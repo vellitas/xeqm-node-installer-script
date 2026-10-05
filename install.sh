@@ -895,6 +895,115 @@ copy_blockchain_to_data_dir() {
   fi
 }
 
+# ── OCI VCN auto-open ───────────────────────────────────────────────────────────
+# On an OCI instance, host iptables/ufw is only half the firewall — the VCN
+# Security List must also allow the ports or remote service nodes can't reach this
+# one (it silently decommissions on failed reachability tests). The installer can
+# open it directly using the node's OWN OCI API access — instance principals (no
+# key; needs a dynamic-group + IAM policy) or an existing ~/.oci/config. It never
+# fails the install: with no access it prints the exact manual step instead.
+OCI_SNODE_PORT_MIN=9330
+OCI_SNODE_PORT_MAX=10832
+
+_oci_vcn_manual_hint() {
+  local region="${1:-<region>}"
+  echo -e "  \033[0;33mOpen the VCN Security List yourself (one-time) so nodes are reachable:\033[0m"
+  echo -e "    Console → VCN → your subnet → Security List → add two Ingress rules:"
+  echo -e "      Stateful · Source 0.0.0.0/0 · TCP · ports ${OCI_SNODE_PORT_MIN}-${OCI_SNODE_PORT_MAX}"
+  echo -e "      Stateful · Source 0.0.0.0/0 · UDP · ports ${OCI_SNODE_PORT_MIN}-${OCI_SNODE_PORT_MAX}"
+  echo -e "    To let this node do it automatically next time, create a dynamic group for"
+  echo -e "    the instance + an IAM policy: 'Allow dynamic-group <dg> to manage"
+  echo -e "    virtual-network-family in compartment <c>', then re-run OCI firewall mode."
+}
+
+oci_open_vcn_ports() {
+  [[ "${config[_vcn_opened]:-0}" -eq 1 ]] && return 0
+  local md
+  md="$(curl -s -m 4 -H 'Authorization: Bearer Oracle' http://169.254.169.254/opc/v2/instance/ 2>/dev/null)" || true
+  [[ -z "${md}" ]] && return 0          # not an OCI instance — nothing to do
+  config[_vcn_opened]=1
+  echo -e "\n\033[1mOracle Cloud: opening the VCN Security List (TCP+UDP ${OCI_SNODE_PORT_MIN}-${OCI_SNODE_PORT_MAX})...\033[0m"
+
+  local oci_bin; oci_bin="$(command -v oci || true)"
+  if [[ -z "${oci_bin}" ]]; then
+    echo -e "  \033[0;33mThe OCI CLI is not installed here, so the VCN can't be opened automatically.\033[0m"
+    _oci_vcn_manual_hint; return 0
+  fi
+
+  local region inst
+  region="$(printf '%s' "${md}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["canonicalRegionName"])' 2>/dev/null)"
+  inst="$(printf '%s' "${md}"   | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' 2>/dev/null)"
+  [[ -z "${region}" || -z "${inst}" ]] && { _oci_vcn_manual_hint; return 0; }
+
+  local auth=()
+  if "${oci_bin}" --auth instance_principal --region "${region}" iam region list >/dev/null 2>&1; then
+    auth=(--auth instance_principal); echo -e "  Authenticated via instance principals."
+  elif [[ -f "${HOME}/.oci/config" || -f /root/.oci/config ]]; then
+    echo -e "  Using the OCI CLI config on this node."
+  else
+    echo -e "  \033[0;33mNo OCI API access from this node (no instance-principal policy, no ~/.oci/config).\033[0m"
+    _oci_vcn_manual_hint "${region}"; return 0
+  fi
+
+  local subnet slid
+  subnet="$("${oci_bin}" "${auth[@]}" --region "${region}" compute instance list-vnics --instance-id "${inst}" 2>/dev/null \
+            | python3 -c 'import sys,json;d=json.load(sys.stdin).get("data") or [];print(d[0]["subnet-id"] if d else "")' 2>/dev/null)"
+  if [[ -z "${subnet}" ]]; then
+    echo -e "  \033[0;33mCould not read this instance's subnet (insufficient permissions?).\033[0m"
+    _oci_vcn_manual_hint "${region}"; return 0
+  fi
+  slid="$("${oci_bin}" "${auth[@]}" --region "${region}" network subnet get --subnet-id "${subnet}" 2>/dev/null \
+          | python3 -c 'import sys,json;ids=json.load(sys.stdin)["data"]["security-list-ids"];print(ids[0] if ids else "")' 2>/dev/null)"
+  [[ -z "${slid}" ]] && { _oci_vcn_manual_hint "${region}"; return 0; }
+
+  local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "${tmp}"' RETURN
+  if ! "${oci_bin}" "${auth[@]}" --region "${region}" network security-list get --security-list-id "${slid}" > "${tmp}/sl.json" 2>/dev/null; then
+    _oci_vcn_manual_hint "${region}"; return 0
+  fi
+  cat > "${tmp}/merge.py" <<'PYEOF'
+import sys,json
+mn,mx,td=int(sys.argv[1]),int(sys.argv[2]),sys.argv[3]
+d=json.load(sys.stdin)["data"]
+ing=d["ingress-security-rules"]; eg=d.get("egress-security-rules",[])
+def ni(r):
+    o={"protocol":r["protocol"],"source":r.get("source"),"isStateless":r.get("is-stateless",False)}
+    if r.get("tcp-options"):  o["tcpOptions"]={"destinationPortRange":r["tcp-options"]["destination-port-range"]}
+    if r.get("udp-options"):  o["udpOptions"]={"destinationPortRange":r["udp-options"]["destination-port-range"]}
+    if r.get("icmp-options"): o["icmpOptions"]=r["icmp-options"]
+    return o
+def has(proto):
+    for r in ing:
+        o=(r.get("tcp-options") if proto=="6" else r.get("udp-options")) or {}
+        dr=o.get("destination-port-range") or {}
+        if r["protocol"]==proto and dr.get("min")==mn and dr.get("max")==mx: return True
+    return False
+out=[ni(r) for r in ing]; changed=False
+if not has("6"):  out.append({"protocol":"6","source":"0.0.0.0/0","tcpOptions":{"destinationPortRange":{"min":mn,"max":mx}}}); changed=True
+if not has("17"): out.append({"protocol":"17","source":"0.0.0.0/0","udpOptions":{"destinationPortRange":{"min":mn,"max":mx}}}); changed=True
+def ne(r):
+    o={"protocol":r["protocol"],"destination":r.get("destination"),"isStateless":r.get("is-stateless",False)}
+    if r.get("tcp-options"): o["tcpOptions"]={"destinationPortRange":r["tcp-options"]["destination-port-range"]}
+    if r.get("udp-options"): o["udpOptions"]={"destinationPortRange":r["udp-options"]["destination-port-range"]}
+    return o
+json.dump(out,open(td+"/ing.json","w")); json.dump([ne(r) for r in eg],open(td+"/eg.json","w"))
+print("CHANGED" if changed else "NOCHANGE")
+PYEOF
+  local res
+  res="$(python3 "${tmp}/merge.py" "${OCI_SNODE_PORT_MIN}" "${OCI_SNODE_PORT_MAX}" "${tmp}" < "${tmp}/sl.json" 2>/dev/null)" \
+    || { echo -e "  \033[0;33mCould not parse the security list.\033[0m"; _oci_vcn_manual_hint "${region}"; return 0; }
+  if [[ "${res}" = "NOCHANGE" ]]; then
+    echo -e "  \033[0;32mVCN already allows ${OCI_SNODE_PORT_MIN}-${OCI_SNODE_PORT_MAX} (TCP+UDP) — nothing to do.\033[0m"
+    return 0
+  fi
+  if "${oci_bin}" "${auth[@]}" --region "${region}" network security-list update --security-list-id "${slid}" --force \
+       --ingress-security-rules "file://${tmp}/ing.json" --egress-security-rules "file://${tmp}/eg.json" >/dev/null 2>&1; then
+    echo -e "  \033[0;32mVCN Security List updated — TCP+UDP ${OCI_SNODE_PORT_MIN}-${OCI_SNODE_PORT_MAX} now open.\033[0m"
+  else
+    echo -e "  \033[0;33mThe VCN update was refused (insufficient permissions?).\033[0m"
+    _oci_vcn_manual_hint "${region}"
+  fi
+}
+
 open_firewall_for_node() {
   local p2p_port="$1"
   local fw_quorumnet_port="$2"
@@ -941,6 +1050,8 @@ open_firewall_for_node() {
       sudo iptables -D INPUT -j REJECT --reject-with icmp-host-prohibited 2>/dev/null || true
       sudo ip6tables -D INPUT -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null || true
       sudo iptables-save | sudo tee /etc/iptables/rules.v4 >/dev/null 2>/dev/null || true
+      # Second half of the OCI firewall: open the VCN Security List too.
+      oci_open_vcn_ports
     fi
   fi
 }
