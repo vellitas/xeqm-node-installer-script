@@ -973,6 +973,41 @@ compile_binary_to_opt() {
   rm -rf "${build_dir}"
 }
 
+# ── Local-sibling bootstrap anchors ───────────────────────────────────────────
+# Public seeds cap incoming connections per source IP, so the Nth service node
+# behind ONE public IP can get zero peers from the seeds alone and stall at
+# bootstrap (0/0 peers) — while still submitting uptime proofs over quorumnet, so
+# it looks healthy yet never syncs blocks. Fix: every node also peers with its
+# LOCAL siblings at 127.0.0.1:<their p2p>, which already hold the peerlist and have
+# spare inbound capacity. These supplement (never replace) the public seed list.
+# Enumerates installed sibling units/plists — gap-aware, any port scheme — and
+# excludes the node currently being written.
+local_sibling_p2p_ports() {
+  local self_p2p="$1" f port
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    for f in "${XEQM_SVC_DIR}/${XEQM_SVC_LABEL_PREFIX}".snode*.plist; do
+      [[ -e "${f}" ]] || continue
+      port="$(grep -oE -- '--p2p-bind-port=[0-9]+' "${f}" 2>/dev/null | head -1 | grep -oE '[0-9]+$')"
+      [[ -n "${port}" && "${port}" != "${self_p2p}" ]] && echo "${port}"
+    done
+  else
+    for f in "${XEQM_SVC_DIR}"/xeqmnode_snode*.service; do
+      [[ -e "${f}" ]] || continue
+      port="$(grep -oE -- '--p2p-bind-port=[0-9]+' "${f}" 2>/dev/null | head -1 | grep -oE '[0-9]+$')"
+      [[ -n "${port}" && "${port}" != "${self_p2p}" ]] && echo "${port}"
+    done
+  fi
+}
+
+# Space-joined "--add-priority-node=127.0.0.1:<port>" args for every local sibling.
+local_sibling_anchor_args() {
+  local self_p2p="$1" port args=""
+  while read -r port; do
+    [[ -n "${port}" ]] && args+=" --add-priority-node=127.0.0.1:${port}"
+  done < <(local_sibling_p2p_ports "${self_p2p}")
+  echo "${args}"
+}
+
 write_canonical_plist() {
   local snode_name="$1"
   local p2p="$2"
@@ -987,6 +1022,11 @@ write_canonical_plist() {
   local log_file="${data_dir}/xeqm-d.log"
 
   mkdir -p "${data_dir}"
+
+  local sibling_anchor_plist="" _sp
+  while read -r _sp; do
+    [[ -n "${_sp}" ]] && sibling_anchor_plist+="$(printf '\n\t\t\t<string>--add-priority-node=127.0.0.1:%s</string>' "${_sp}")"
+  done < <(local_sibling_p2p_ports "${p2p}")
 
   local log_level_arg=""
   [[ -n "${log_level}" ]] && log_level_arg="
@@ -1012,7 +1052,7 @@ write_canonical_plist() {
 		<string>--quorumnet-port=${qnet}</string>
 		<string>--service-node-public-ip=${public_ip}</string>
 		<string>--seed-node=seeds.xeqmlabs.com:9230</string>
-		<string>--add-priority-node=seeds.xeqmlabs.com:9230</string>${log_level_arg}
+		<string>--add-priority-node=seeds.xeqmlabs.com:9230</string>${sibling_anchor_plist}${log_level_arg}
 	</array>
 	<key>WorkingDirectory</key>
 	<string>${data_dir}</string>
@@ -1052,6 +1092,9 @@ write_canonical_unit() {
   local opt_log_level_arg=""
   [[ -n "${log_level}" ]] && opt_log_level_arg=" --log-level ${log_level}"
 
+  local sibling_anchors
+  sibling_anchors="$(local_sibling_anchor_args "${p2p}")"
+
   sudo tee "${unit_file}" > /dev/null <<EOF
 [Unit]
 Description=XEQMLabs Service Node (${snode_name})
@@ -1065,7 +1108,7 @@ Group=xeqm
 StateDirectory=xeqm/${snode_name}
 StateDirectoryMode=0700
 WorkingDirectory=${data_dir}
-ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${opt_log_level_arg}
+ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${sibling_anchors}${opt_log_level_arg}
 Restart=always
 RestartSec=15s
 TimeoutStartSec=300s
