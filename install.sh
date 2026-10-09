@@ -1484,7 +1484,8 @@ Cmnd_Alias XEQM_AGENT_PRUNE = \
     /bin/rm /opt/xeqm/bin/*.bak.*, /bin/rm /home/snode*/bin/*.bak.*
 Cmnd_Alias XEQM_AGENT_VERSION = \
     /opt/xeqm/bin/xeqm-d --version, /opt/xeqm/bin/xeqm-rpc --version, /opt/xeqm/bin/xeqm-wallet --version, \
-    /opt/xeqm/bin/xeqm-mdb_copy --version, /opt/xeqm/bin/xeqm-mdb_stat --version, /home/snode*/bin/xeqm-d --version
+    /opt/xeqm/bin/xeqm-mdb_copy --version, /opt/xeqm/bin/xeqm-mdb_stat --version, /home/snode*/bin/xeqm-d --version, \
+    /tmp/xeqm-suds-*/xeqm-d --version, /tmp/xeqm-suds-*/*/xeqm-d --version
 Cmnd_Alias XEQM_AGENT_MISC = \
     /usr/bin/cp * /opt/xeqm-agent/*, /opt/xeqm-agent/capture-stack *, /usr/sbin/ufw status, /usr/sbin/ufw allow *
 xeqm-agent ALL=(root) NOPASSWD: XEQM_AGENT_SYSTEMCTL, XEQM_AGENT_BACKUP, XEQM_AGENT_INSTALL, XEQM_AGENT_PRUNE, XEQM_AGENT_VERSION, XEQM_AGENT_MISC
