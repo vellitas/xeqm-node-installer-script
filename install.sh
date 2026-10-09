@@ -1493,7 +1493,8 @@ SUDOERS
   sudo visudo -cf /etc/sudoers.d/xeqm-agent >/dev/null \
     || { echo -e "  \033[0;31mERROR: xeqm-agent sudoers invalid; removed\033[0m"; sudo rm -f /etc/sudoers.d/xeqm-agent; }
   # Remove superseded agent sudoers files from older installer versions (grants now in xeqm-agent).
-  sudo rm -f /etc/sudoers.d/xeqm-agent-restart /etc/sudoers.d/xeqm-agent-upgrade /etc/sudoers.d/xeqm-suds-agent
+  sudo rm -f /etc/sudoers.d/xeqm-agent-restart /etc/sudoers.d/xeqm-agent-upgrade \
+             /etc/sudoers.d/xeqm-suds-agent /etc/sudoers.d/xeqm-agent-capture
 
   sudo tee /etc/systemd/system/xeqm-agent.service > /dev/null <<'SVCEOF'
 [Unit]
