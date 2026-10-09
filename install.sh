@@ -1447,13 +1447,54 @@ AGENTCONF
   sudo chown root:xeqm-agent /etc/xeqm-agent.conf
   echo -e "  Wrote: /etc/xeqm-agent.conf"
 
-  sudo tee /etc/sudoers.d/xeqm-agent-restart > /dev/null <<'SUDOERS'
-xeqm-agent ALL=(root) NOPASSWD: /bin/systemctl stop xeqmnode_snode*.service, /bin/systemctl start xeqmnode_snode*.service
-xeqm-agent ALL=(root) NOPASSWD: /usr/bin/cp * /opt/xeqm-agent/*
-xeqm-agent ALL=(ALL) NOPASSWD: /usr/sbin/ufw status
-xeqm-agent ALL=(ALL) NOPASSWD: /usr/sbin/ufw allow *
+  # Operator Dashboard agent sudoers -- ONE canonical file, identical on every node, so the
+  # dashboard works in both production mode (stop/start/restart any xeqmnode_* service node or
+  # xeqm-* role unit) and maintenance mode (binary backup/install/rollback/prune/version),
+  # plus firewall auto-heal, agent self-update, and the privileged stack-capture helper.
+  # Covers /opt/xeqm/bin and the legacy /home/snode*/bin layout. No per-role variance.
+  sudo tee /etc/sudoers.d/xeqm-agent > /dev/null <<'SUDOERS'
+# XEQMLabs Operator Dashboard agent sudoers -- canonical, identical on every node.
+Cmnd_Alias XEQM_AGENT_SYSTEMCTL = \
+    /bin/systemctl stop xeqmnode_*.service, /bin/systemctl start xeqmnode_*.service, /bin/systemctl restart xeqmnode_*.service, \
+    /bin/systemctl stop xeqm-*.service, /bin/systemctl start xeqm-*.service, /bin/systemctl restart xeqm-*.service
+Cmnd_Alias XEQM_AGENT_BACKUP = \
+    /bin/cp -a /opt/xeqm/bin/xeqm-d /opt/xeqm/bin/xeqm-d.bak.*, \
+    /bin/cp -a /opt/xeqm/bin/xeqm-rpc /opt/xeqm/bin/xeqm-rpc.bak.*, \
+    /bin/cp -a /opt/xeqm/bin/xeqm-wallet /opt/xeqm/bin/xeqm-wallet.bak.*, \
+    /bin/cp -a /opt/xeqm/bin/xeqm-mdb_copy /opt/xeqm/bin/xeqm-mdb_copy.bak.*, \
+    /bin/cp -a /opt/xeqm/bin/xeqm-mdb_stat /opt/xeqm/bin/xeqm-mdb_stat.bak.*, \
+    /bin/cp -a /home/snode*/bin/xeqm-d /home/snode*/bin/xeqm-d.bak.*, \
+    /bin/cp -a /home/snode*/bin/xeqm-rpc /home/snode*/bin/xeqm-rpc.bak.*, \
+    /bin/cp -a /home/snode*/bin/xeqm-wallet /home/snode*/bin/xeqm-wallet.bak.*
+Cmnd_Alias XEQM_AGENT_INSTALL = \
+    /usr/bin/install -o root -g root -m 0755 /tmp/xeqm-suds-*/* /opt/xeqm/bin/xeqm-d, \
+    /usr/bin/install -o root -g root -m 0755 /tmp/xeqm-suds-*/* /opt/xeqm/bin/xeqm-rpc, \
+    /usr/bin/install -o root -g root -m 0755 /tmp/xeqm-suds-*/* /opt/xeqm/bin/xeqm-wallet, \
+    /usr/bin/install -o root -g root -m 0755 /tmp/xeqm-suds-*/* /opt/xeqm/bin/xeqm-mdb_copy, \
+    /usr/bin/install -o root -g root -m 0755 /tmp/xeqm-suds-*/* /opt/xeqm/bin/xeqm-mdb_stat, \
+    /usr/bin/install -o root -g root -m 0755 /tmp/xeqm-suds-*/* /home/snode*/bin/*, \
+    /usr/bin/install -o root -g root -m 0755 /opt/xeqm/bin/xeqm-d.bak.* /opt/xeqm/bin/xeqm-d, \
+    /usr/bin/install -o root -g root -m 0755 /opt/xeqm/bin/xeqm-rpc.bak.* /opt/xeqm/bin/xeqm-rpc, \
+    /usr/bin/install -o root -g root -m 0755 /opt/xeqm/bin/xeqm-wallet.bak.* /opt/xeqm/bin/xeqm-wallet, \
+    /usr/bin/install -o root -g root -m 0755 /opt/xeqm/bin/xeqm-mdb_copy.bak.* /opt/xeqm/bin/xeqm-mdb_copy, \
+    /usr/bin/install -o root -g root -m 0755 /opt/xeqm/bin/xeqm-mdb_stat.bak.* /opt/xeqm/bin/xeqm-mdb_stat, \
+    /usr/bin/install -o root -g root -m 0755 /home/snode*/bin/*.bak.* /home/snode*/bin/*
+Cmnd_Alias XEQM_AGENT_PRUNE = \
+    /bin/ls /opt/xeqm/bin, /bin/ls /opt/xeqm/bin/, /bin/ls /home/snode*/bin, /bin/ls /home/snode*/bin/, \
+    /bin/rm /opt/xeqm/bin/*.bak.*, /bin/rm /home/snode*/bin/*.bak.*
+Cmnd_Alias XEQM_AGENT_VERSION = \
+    /opt/xeqm/bin/xeqm-d --version, /opt/xeqm/bin/xeqm-rpc --version, /opt/xeqm/bin/xeqm-wallet --version, \
+    /opt/xeqm/bin/xeqm-mdb_copy --version, /opt/xeqm/bin/xeqm-mdb_stat --version, /home/snode*/bin/xeqm-d --version
+Cmnd_Alias XEQM_AGENT_MISC = \
+    /usr/bin/cp * /opt/xeqm-agent/*, /opt/xeqm-agent/capture-stack *, /usr/sbin/ufw status, /usr/sbin/ufw allow *
+xeqm-agent ALL=(root) NOPASSWD: XEQM_AGENT_SYSTEMCTL, XEQM_AGENT_BACKUP, XEQM_AGENT_INSTALL, XEQM_AGENT_PRUNE, XEQM_AGENT_VERSION, XEQM_AGENT_MISC
 SUDOERS
-  sudo chmod 440 /etc/sudoers.d/xeqm-agent-restart
+  sudo chmod 440 /etc/sudoers.d/xeqm-agent
+  sudo visudo -cf /etc/sudoers.d/xeqm-agent >/dev/null \
+    || { echo -e "  \033[0;31mERROR: xeqm-agent sudoers invalid; removed\033[0m"; sudo rm -f /etc/sudoers.d/xeqm-agent; }
+  # Remove superseded agent sudoers files from older installer versions (grants now in xeqm-agent).
+  sudo rm -f /etc/sudoers.d/xeqm-agent-restart /etc/sudoers.d/xeqm-agent-upgrade \
+             /etc/sudoers.d/xeqm-suds-agent /etc/sudoers.d/xeqm-agent-capture
 
   sudo tee /etc/systemd/system/xeqm-agent.service > /dev/null <<'SVCEOF'
 [Unit]
