@@ -29,6 +29,7 @@ typeset -A command_options_set
 command_options_set=(
   [help]=0
   [copy_blockchain]=0
+  [db_backend]=0
   [copy_binaries]=0
   [inspect_auto_magic]=0
   [nodes]=0
@@ -44,6 +45,7 @@ command_options_set=(
 )
 copy_binaries_option_value=
 copy_blockchain_option_value=
+db_backend_option_value=
 nodes_option_value=
 ports_option_value=
 version_option_value=
@@ -128,7 +130,7 @@ process_command_line_args() {
 }
 
 parse_command_line_args() {
-  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,force -- "$@")"
+  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,db-backend:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,force -- "$@")"
   eval set -- "${args}"
 
   while :
@@ -137,6 +139,7 @@ parse_command_line_args() {
       -h | --help)                    command_options_set[help]=1 ; shift ;;
       -b | --copy-binaries)           command_options_set[copy_binaries]=1; copy_binaries_option_value="$2"; shift 2 ;;
       -c | --copy-blockchain)         command_options_set[copy_blockchain]=1; copy_blockchain_option_value="$2"; shift 2 ;;
+      --db-backend)                   command_options_set[db_backend]=1; db_backend_option_value="$2"; shift 2 ;;
       -i | --inspect-auto-magic)      command_options_set[inspect_auto_magic]=1; shift ;;
       -n | --nodes)                   command_options_set[nodes]=1; nodes_option_value="$2"; shift 2 ;;
       -p | --ports)                   command_options_set[ports]=1; ports_option_value="$2"; shift 2 ;;
@@ -163,7 +166,7 @@ set_config_and_execute_info_commands() {
   if [[ "${command_options_set[quiet]}" -eq 1 ]]; then config[quiet_mode]=1; fi
 
   local _wz_any=0
-  for _wz_f in nodes ports copy_blockchain copy_binaries version open_firewall inspect_auto_magic; do
+  for _wz_f in nodes ports copy_blockchain db_backend copy_binaries version open_firewall inspect_auto_magic; do
     [[ "${command_options_set[${_wz_f}]:-0}" -eq 1 ]] && _wz_any=1 && break
   done
   if [[ "${config[quiet_mode]:-0}" -eq 0 && "${_wz_any}" -eq 0 ]] && wt_available; then
@@ -185,6 +188,13 @@ set_config_and_execute_info_commands() {
 
   if [[ "${command_options_set[version]}" -eq 1 ]]; then version_option_handler "${version_option_value}"; else version_option_handler "auto"; fi
   if [[ "${command_options_set[ports]}" -eq 1 ]]; then ports_option_handler "${ports_option_value}"; else ports_option_handler "auto"; fi
+  if [[ "${command_options_set[db_backend]}" -eq 1 ]]; then
+    db_backend_option_handler "${db_backend_option_value}"
+  elif [[ "${config[quiet_mode]}" -eq 1 ]]; then
+    db_backend_option_handler "lmdb"
+  else
+    db_backend_selection_menu
+  fi
   if [[ "${command_options_set[copy_blockchain]}" -eq 1 ]]; then
     copy_blockchain_option_handler "${copy_blockchain_option_value}"
   elif [[ "${config[quiet_mode]}" -eq 1 ]]; then
@@ -232,7 +242,7 @@ set_config_and_execute_info_commands() {
 validate_parsed_command_line_args() {
   local valid_option_combinations=(
     "<no_options_set>"
-    "copy_blockchain copy_binaries nodes ports version daemon_no_fluffy_blocks daemon_log_level git_repository open_firewall quiet force"
+    "copy_blockchain db_backend copy_binaries nodes ports version daemon_no_fluffy_blocks daemon_log_level git_repository open_firewall quiet force"
     "inspect_auto_magic nodes"
     "help"
   )
@@ -374,6 +384,7 @@ nodes_option_handler() {
   local idx=1
   while [ "${idx}" -le "${config[nodes]}" ]; do
     config["snode${idx}__copy_blockchain"]=
+    config["snode${idx}__db_backend"]='lmdb'
     config["snode${idx}__copy_binaries"]=
     config["snode${idx}__p2p_bind_port"]=0
     config["snode${idx}__rpc_bind_port"]=0
@@ -435,6 +446,60 @@ prompt_binary_source() {
       2) config[binary_source]="compile" ;;
     esac
   fi
+}
+
+# Minimum daemon version that understands XEQM_DB_BACKEND=sqlite.
+_SQLITE_MIN_VERSION='1.1.4'
+
+# _version_ge <a> <b> : true if version a >= b (numeric dotted compare, suffixes ignored).
+_version_ge() {
+  local a="${1%%-*}" b="${2%%-*}"
+  [[ "$(printf '%s\n%s\n' "$b" "$a" | sort -V | tail -1)" == "$a" ]]
+}
+
+# Refuse (or warn) if the requested backend needs a newer binary than will be installed.
+# config[install_version] is already resolved by version_option_handler at this point;
+# 'auto'/non-numeric means "latest", which we cannot pin here, so we warn instead of fail.
+_check_backend_version() {
+  local backend="$1" ver="${config[install_version]}"
+  [[ "${backend}" != "sqlite" ]] && return 0
+  local _num="${ver#v}"
+  if [[ "${_num}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    if ! _version_ge "${_num}" "${_SQLITE_MIN_VERSION}"; then
+      echo -e "\n\033[0;31merror: --db-backend sqlite requires xeqm-d v${_SQLITE_MIN_VERSION}+ (requested ${ver})\033[0m\n"
+      exit 1
+    fi
+  else
+    echo -e "\n\033[1;33mNote: SQLite backend requires xeqm-d v${_SQLITE_MIN_VERSION}+. Ensure the installed version supports it.\033[0m"
+  fi
+}
+
+db_backend_option_handler() {
+  local option_value="$1"
+  local idx=1
+  case "${option_value}" in
+    lmdb|sqlite) ;;
+    *) echo -e "\n\033[0;33merror: invalid --db-backend value '${option_value}' (expected lmdb or sqlite)\033[0m\n"
+       install_usage; exit 1 ;;
+  esac
+  _check_backend_version "${option_value}"
+  config[db_backend]="${option_value}"
+  while [ "${idx}" -le "${config[nodes]}" ]; do
+    config["snode${idx}__db_backend"]="${option_value}"
+    idx=$((idx + 1))
+  done
+  echo -e "\n\033[1mDatabase backend: ${option_value}\033[0m"
+}
+
+db_backend_selection_menu() {
+  local choice
+  prompt_menu "Which blockchain database backend should these nodes use?" choice 1 \
+    "LMDB  (default, all releases)" \
+    "SQLite  (experimental, requires v${_SQLITE_MIN_VERSION}+)"
+  case "${choice}" in
+    1) db_backend_option_handler "lmdb" ;;
+    2) db_backend_option_handler "sqlite" ;;
+  esac
 }
 
 blockchain_selection_menu() {
@@ -680,6 +745,7 @@ pre_install_summary() {
   [[ "${bc}" = "no" ]]               && bc="Sync from network"
   [[ "${bc}" = "copy_from_snode1" ]] && bc="Copy from snode1 (first syncs, rest copy)"
   printf "  %-24s %s\n" "Blockchain:" "${bc}"
+  printf "  %-24s %s\n" "DB backend:" "${config[db_backend]:-lmdb}"
 
   local fw="${config[firewall_mode]:-none}"
   case "${fw}" in
@@ -756,7 +822,7 @@ install_manager() {
         bc_val="no"
       fi
     fi
-    copy_blockchain_to_data_dir "${data_dir}" "${bc_val}"
+    copy_blockchain_to_data_dir "${data_dir}" "${bc_val}" "${node_config[db_backend]:-lmdb}"
     [[ "${idx}" -eq 1 ]] && snode1_data_dir="${data_dir}"
 
     print_step 4 4 "Writing service unit and starting service"
@@ -766,7 +832,8 @@ install_manager() {
       "${node_config[rpc_bind_port]}" \
       "${node_config[quorumnet_port]}" \
       "${config[service_node_public_ip]}" \
-      "${config[daemon_log_level]:-}"
+      "${config[daemon_log_level]:-}" \
+      "${node_config[db_backend]:-lmdb}"
 
     svc_reload_daemon
     clear_port_if_stale "${node_config[p2p_bind_port]}"
@@ -806,6 +873,7 @@ generate_node_config() {
     [quorumnet_port]="${config["snode${node_id}__quorumnet_port"]}"
     [oxenmq_port]="${config["snode${node_id}__oxenmq_port"]}"
     [copy_blockchain]="${config["snode${node_id}__copy_blockchain"]}"
+    [db_backend]="${config["snode${node_id}__db_backend"]:-lmdb}"
     [copy_binaries]="${config["snode${node_id}__copy_binaries"]:-}"
     [binary_source]="${config[binary_source]}"
     [daemon_no_fluffy_blocks]="${config[daemon_no_fluffy_blocks]}"
@@ -816,24 +884,50 @@ generate_node_config() {
   )
 }
 
-# Find a local snode data dir that has a fully-indexed sqlite.db, excluding $1
+# Find a local snode data dir with a matching-backend blockchain, excluding $1.
+# $2 backend: lmdb looks for lmdb/data.mdb, sqlite looks for xeqm.db. In both
+# cases the donor must also have a fully-indexed sqlite.db (SN-list cache).
 _find_indexed_snode() {
   local exclude_dir="$1"
-  local _mdb _candidate
-  while IFS= read -r _mdb; do
-    _candidate="$(dirname "$(dirname "${_mdb}")")"
+  local backend="${2:-lmdb}"
+  local _marker _pattern _candidate
+  if [[ "${backend}" == "sqlite" ]]; then
+    _pattern='xeqm.db'
+  else
+    _pattern='data.mdb'
+  fi
+  while IFS= read -r _marker; do
+    if [[ "${backend}" == "sqlite" ]]; then
+      _candidate="$(dirname "${_marker}")"
+    else
+      _candidate="$(dirname "$(dirname "${_marker}")")"
+    fi
     # Only use snode* directories — skip seed, pubnode, etc.
     [[ "$(basename "${_candidate}")" != snode* ]] && continue
     if [[ -f "${_candidate}/sqlite.db" && "${_candidate}" != "${exclude_dir}" ]]; then
       echo "${_candidate}"
       return 0
     fi
-  done < <(find "${XEQM_STATE_BASE}" -maxdepth 3 -name 'data.mdb' 2>/dev/null | sort)
+  done < <(find "${XEQM_STATE_BASE}" -maxdepth 3 -name "${_pattern}" 2>/dev/null | sort)
 }
 
-# Copy lmdb + sqlite.db + ons.db from $1 into $2 (excludes keys, sockets, logs)
+# Copy the blockchain + sqlite.db + ons.db from $1 into $2 (excludes keys, sockets, logs).
+# $3 backend: lmdb copies lmdb/ (via mdb_copy); sqlite copies xeqm.db (via sqlite3 .backup).
 _copy_chain_state() {
-  local src="$1" dst="$2"
+  local src="$1" dst="$2" backend="${3:-lmdb}"
+  if [[ "${backend}" == "sqlite" ]]; then
+    # Move aside any existing xeqm.db, then take a consistent online copy of the
+    # donor's (possibly live) xeqm.db. A plain cp of a live SQLite DB is torn.
+    [[ -f "${dst}/xeqm.db" ]] && ${_SUDO} mv "${dst}/xeqm.db" "${dst}/xeqm.db_$(printf '%08x' $RANDOM)"
+    if [[ -f "${src}/xeqm.db" ]]; then
+      if command -v sqlite3 >/dev/null 2>&1; then
+        ${_SUDO} sqlite3 "${src}/xeqm.db" ".backup '${dst}/xeqm.db'" 2>/dev/null \
+          || { echo "  note: xeqm.db online-backup failed — falling back to network sync"; }
+      else
+        echo "  note: sqlite3 not installed — cannot copy xeqm.db; node will sync from network"
+      fi
+    fi
+  else
   if [[ -d "${dst}/lmdb" ]]; then
     ${_SUDO} mv "${dst}/lmdb" "${dst}/lmdb_$(printf '%08x' $RANDOM)"
   fi
@@ -849,6 +943,7 @@ _copy_chain_state() {
     else
       ${_SUDO} cp -R "${src}/lmdb" "${dst}/" || true
     fi
+  fi
   fi
   # sqlite.db/ons.db may be mid-write on a running source; a plain cp of the file
   # (plus -shm/-wal) yields a torn DB the daemon can reject. Use sqlite3's online
@@ -870,18 +965,19 @@ _copy_chain_state() {
 copy_blockchain_to_data_dir() {
   local data_dir="$1"
   local blockchain_value="$2"
+  local backend="${3:-lmdb}"
 
   if [[ "${blockchain_value}" = "bootstrap" ]]; then
-    # If any local node already has sqlite.db (fully indexed), copy from it —
-    # avoids the 6-min rescan on every node across re-runs of the installer.
+    # If any local node already has a matching-backend, fully-indexed chain, copy
+    # from it — avoids the rescan on every node across re-runs of the installer.
     local _local_src
-    _local_src="$(_find_indexed_snode "${data_dir}")"
+    _local_src="$(_find_indexed_snode "${data_dir}" "${backend}")"
     if [[ -n "${_local_src}" ]]; then
-      echo -e "\n\033[1mCopying blockchain + chain state from existing node '${_local_src}'...\033[0m"
-      _copy_chain_state "${_local_src}" "${data_dir}"
+      echo -e "\n\033[1mCopying ${backend} blockchain + chain state from existing node '${_local_src}'...\033[0m"
+      _copy_chain_state "${_local_src}" "${data_dir}" "${backend}"
       return 0
     fi
-    download_bootstrap "${data_dir}" "xeqm"
+    download_bootstrap "${data_dir}" "xeqm" "${backend}"
     return 0
   fi
 
@@ -891,8 +987,8 @@ copy_blockchain_to_data_dir() {
   fi
 
   if [[ -d "${blockchain_value}" ]]; then
-    echo -e "\n\033[1mCopying blockchain + chain state from '${blockchain_value}'...\033[0m"
-    _copy_chain_state "${blockchain_value}" "${data_dir}"
+    echo -e "\n\033[1mCopying ${backend} blockchain + chain state from '${blockchain_value}'...\033[0m"
+    _copy_chain_state "${blockchain_value}" "${data_dir}" "${backend}"
   fi
 }
 
@@ -1701,6 +1797,13 @@ Options:
                                                   --copy-blockchain no
                                                   --copy-blockchain no,auto
 
+  --db-backend [lmdb|sqlite]            Blockchain database backend (default: lmdb).
+                                        'sqlite' sets XEQM_DB_BACKEND=sqlite in each unit
+                                        and fetches the sqlite bootstrap (xeqm.db). Requires
+                                        xeqm-d v1.1.4+. LMDB is the default for all releases.
+
+                                        Example: --db-backend sqlite
+
   -i --inspect-auto-magic               Preview auto-detected ports and version.
 
   -n --nodes [number]                   Number of nodes to install (default: 1).
@@ -1822,6 +1925,20 @@ wz_blockchain() {
     Bootstrap) copy_blockchain_option_handler "bootstrap" >/dev/null 2>&1 ;;
     Auto)      copy_blockchain_option_handler "auto"      >/dev/null 2>&1 ;;
     Sync)      copy_blockchain_option_handler "no"        >/dev/null 2>&1 ;;
+  esac
+  return 0
+}
+
+wz_db_backend() {
+  local _choice
+  wt_menu "Database Backend" "Which blockchain database backend should the node(s) use?" \
+    11 70 2 _choice \
+    "LMDB"   "Default — works with every release" \
+    "SQLite" "Experimental — requires xeqm-d v${_SQLITE_MIN_VERSION}+"
+  local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
+  case "${_choice}" in
+    LMDB)   db_backend_option_handler "lmdb"   >/dev/null 2>&1 ;;
+    SQLite) db_backend_option_handler "sqlite" >/dev/null 2>&1 ;;
   esac
   return 0
 }
@@ -2082,6 +2199,7 @@ wz_confirm() {
   _sum+="$(printf "%-12s %s\n" "Binaries:"   "${_bin}")\n"
   _sum+="$(printf "%-12s %s\n" "Version:"    "${config[install_version]}")\n"
   _sum+="$(printf "%-12s %s\n" "Blockchain:" "${_bc}")\n"
+  _sum+="$(printf "%-12s %s\n" "DB backend:" "${config[db_backend]:-lmdb}")\n"
   _sum+="$(printf "%-12s %s\n" "Public IP:"  "${config[service_node_public_ip]}")\n"
   _sum+="$(printf "%-12s %s\n" "Firewall:"   "${_fw}")\n"
   _sum+="$(printf "%-12s %s\n" "Agent:"      "${_agent_label}")\n\n"
@@ -2117,7 +2235,7 @@ wz_confirm() {
 }
 
 run_wizard() {
-  local _steps=(wz_nodes wz_binary_source wz_blockchain wz_public_ip wz_firewall wz_detect wz_agent wz_confirm)
+  local _steps=(wz_nodes wz_binary_source wz_blockchain wz_db_backend wz_public_ip wz_firewall wz_detect wz_agent wz_confirm)
   local _step=0
   while [[ ${_step} -lt ${#_steps[@]} ]]; do
     local _rc=0
