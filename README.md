@@ -401,6 +401,25 @@ Quorumnet is derived automatically as P2P+2 per node.
 bash install.sh --version core-v1.0.7
 ```
 
+### Lokinet relay sidecar (opt-in, Linux only)
+
+Off by default. When enabled, each service node runs its own lokinet relay as a
+sidecar on a private network (netid `xeqm`), keyed to that SN over its oxend control
+socket. This is non-enforcing ops and packaging only, so a relay being down does not
+affect the service node.
+
+```bash
+bash install.sh --lokinet                                   # enable, default bootstrap RC
+bash install.sh --lokinet --lokinet-bootstrap /path/to/lokinet-bootstrap.signed
+bash install.sh --lokinet --lokinet-bootstrap https://example.com/lokinet-bootstrap.signed
+```
+
+Per node, by install index `idx` (1..N), the link port `1090+idx/udp` is opened in
+the firewall, the api binds to `127.0.0.1:1190+idx`, and dns binds to
+`127.3.2.idx:53`. Config lives at `/etc/xeqm-lokinet/<snode>.ini`, state at
+`/var/lib/xeqm-lokinet/<snode>`, and the relay runs under the template unit
+`xeqm-lokinet@<snode>`. See CANONICAL_LAYOUT.md for the full design.
+
 ### Fully non-interactive install
 
 ```bash

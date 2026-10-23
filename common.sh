@@ -32,6 +32,7 @@ config=(
   [quiet_mode]=0
   [binary_source]='compile'
   [service_node_public_ip]=
+  [lokinet]=0
 )
 
 typeset -A installer_state
@@ -1080,6 +1081,7 @@ write_canonical_unit() {
   local qnet="$4"
   local public_ip="$5"
   local log_level="${6:-}"
+  local lokinet_enabled="${7:-0}"
 
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
     write_canonical_plist "${snode_name}" "${p2p}" "${rpc}" "${qnet}" "${public_ip}" "${log_level}"
@@ -1095,6 +1097,11 @@ write_canonical_unit() {
   local sibling_anchors
   sibling_anchors="$(local_sibling_anchor_args "${p2p}")"
 
+  # Lokinet sidecar reads this SN's identity over the oxend control socket, so
+  # expose it only when lokinet is enabled for this install (opt-in, non-enforcing).
+  local lokinet_control_arg=""
+  [[ "${lokinet_enabled}" -eq 1 ]] && lokinet_control_arg=" --lmq-local-control=ipc://${data_dir}/oxend.sock"
+
   sudo tee "${unit_file}" > /dev/null <<EOF
 [Unit]
 Description=XEQMLabs Service Node (${snode_name})
@@ -1108,7 +1115,7 @@ Group=xeqm
 StateDirectory=xeqm/${snode_name}
 StateDirectoryMode=0700
 WorkingDirectory=${data_dir}
-ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${sibling_anchors}${opt_log_level_arg}
+ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${sibling_anchors}${opt_log_level_arg}${lokinet_control_arg}
 Restart=always
 RestartSec=15s
 TimeoutStartSec=300s
@@ -1126,6 +1133,136 @@ WantedBy=multi-user.target
 EOF
 
   echo -e "  Unit written: ${unit_file}"
+}
+
+# ── Lokinet relay sidecar (opt-in, non-enforcing) ─────────────────────────────
+# One lokinet relay per service node, keyed to that SN's identity over the
+# daemon's oxend control socket. Private network, netid=xeqm. Linux/systemd only;
+# on macOS these functions are a no-op (lokinet needs /dev/net/tun).
+_LOKINET_BIN="/opt/xeqm/bin/lokinet"
+_LOKINET_CONF_DIR="/etc/xeqm-lokinet"
+_LOKINET_STATE_BASE="/var/lib/xeqm-lokinet"
+_LOKINET_DEFAULT_BOOTSTRAP="https://bootstrap.xeqmlabs.com/lokinet-bootstrap.signed"
+
+# write_lokinet_config <snodeName> <idx> <public_ip> <bootstrap_src>
+# Writes /etc/xeqm-lokinet/<snodeName>.ini for this SN's lokinet relay. The
+# bootstrap RC itself is placed separately by place_lokinet_bootstrap; the config
+# only references its fixed path inside the per-SN state dir.
+write_lokinet_config() {
+  local snode_name="$1"
+  local idx="$2"
+  local public_ip="$3"
+  local bootstrap_src="${4:-}"   # placed by place_lokinet_bootstrap, not inlined here
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "  \033[0;33mLokinet is Linux-only, skipping config for '${snode_name}' on macOS.\033[0m"
+    return 0
+  fi
+
+  local link_port=$(( 1090 + idx ))
+  local api_port=$(( 1190 + idx ))
+  local state_dir="${_LOKINET_STATE_BASE}/${snode_name}"
+  local conf_file="${_LOKINET_CONF_DIR}/${snode_name}.ini"
+
+  ${_SUDO} mkdir -p "${_LOKINET_CONF_DIR}" "${state_dir}"
+  ${_SUDO} chown xeqm:xeqm "${state_dir}"
+
+  ${_SUDO} tee "${conf_file}" > /dev/null <<EOF
+[router]
+netid=xeqm
+data-dir=${state_dir}
+public-ip=${public_ip}
+public-port=${link_port}
+worker-threads=0
+[bind]
+inbound=0.0.0.0:${link_port}
+[lokid]
+enabled=true
+rpc=ipc:///var/lib/xeqm/${snode_name}/oxend.sock
+[bootstrap]
+add-node=${state_dir}/bootstrap.signed
+[api]
+enabled=true
+bind=tcp://127.0.0.1:${api_port}
+[dns]
+bind=127.3.2.${idx}:53
+[logging]
+type=file
+file=${state_dir}/lokinet.log
+level=info
+EOF
+
+  echo -e "  Lokinet config written: ${conf_file}  (link ${link_port}/udp, api 127.0.0.1:${api_port}, dns 127.3.2.${idx}:53)"
+}
+
+# install_lokinet_template_unit : writes the xeqm-lokinet@.service template unit
+# once (instance = snode name, e.g. xeqm-lokinet@snode1). Safe to call repeatedly.
+install_lokinet_template_unit() {
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local unit_file="/etc/systemd/system/xeqm-lokinet@.service"
+  # Quoted heredoc: %i is a systemd instance specifier and must stay literal.
+  ${_SUDO} tee "${unit_file}" > /dev/null <<'EOF'
+[Unit]
+Description=XEQM Lokinet relay (%i)
+After=network-online.target xeqmnode_%i.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=xeqm
+Group=xeqm
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+DeviceAllow=/dev/net/tun rw
+ExecStart=/opt/xeqm/bin/lokinet -r /etc/xeqm-lokinet/%i.ini
+Restart=on-failure
+RestartSec=10
+StateDirectory=xeqm-lokinet/%i
+ReadWritePaths=/var/lib/xeqm-lokinet/%i
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  echo -e "  Lokinet template unit written: ${unit_file}"
+}
+
+# place_lokinet_bootstrap <snodeName> <bootstrap_src>
+# Fetches (curl/wget) or copies the bootstrap RC into the SN's lokinet state dir.
+# Warns but does not fail when the RC cannot be obtained, the config is still
+# written and doctor flags the missing RC.
+place_lokinet_bootstrap() {
+  local snode_name="$1"
+  local bootstrap_src="${2:-${_LOKINET_DEFAULT_BOOTSTRAP}}"
+
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local state_dir="${_LOKINET_STATE_BASE}/${snode_name}"
+  local dest="${state_dir}/bootstrap.signed"
+  ${_SUDO} mkdir -p "${state_dir}"
+
+  local _ok=0
+  case "${bootstrap_src}" in
+    http://*|https://*)
+      if command -v curl >/dev/null 2>&1; then
+        ${_SUDO} curl -fsSL -o "${dest}" "${bootstrap_src}" && _ok=1 || true
+      elif command -v wget >/dev/null 2>&1; then
+        ${_SUDO} wget -q -O "${dest}" "${bootstrap_src}" && _ok=1 || true
+      fi
+      ;;
+    *)
+      if [[ -f "${bootstrap_src}" ]]; then
+        ${_SUDO} cp -f "${bootstrap_src}" "${dest}" && _ok=1 || true
+      fi
+      ;;
+  esac
+
+  if [[ "${_ok}" -eq 1 ]]; then
+    ${_SUDO} chown xeqm:xeqm "${dest}"
+    echo -e "  Lokinet bootstrap placed: ${dest}"
+  else
+    echo -e "  \033[0;33mwarning: could not obtain lokinet bootstrap RC from '${bootstrap_src}' for '${snode_name}'.\033[0m"
+    echo -e "  \033[0;33m         Config is written; doctor will flag the missing ${dest}.\033[0m"
+  fi
 }
 
 download_release_binaries() {

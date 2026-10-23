@@ -44,6 +44,19 @@ _discover_ports() {
   done
 }
 
+# ── Lokinet relay ports ───────────────────────────────────────────────────────
+# Discover configured lokinet relay UDP link ports from /etc/xeqm-lokinet/*.ini.
+# Populates _fw_lokinet_ports (empty when the opt-in lokinet sidecar is not used).
+_discover_lokinet_ports() {
+  _fw_lokinet_ports=()
+  local _ini _port
+  for _ini in /etc/xeqm-lokinet/*.ini; do
+    [[ -f "${_ini}" ]] || continue
+    _port=$(grep -m1 '^public-port=' "${_ini}" 2>/dev/null | cut -d= -f2 || true)
+    [[ -n "${_port}" ]] && _fw_lokinet_ports+=( "${_port}" )
+  done
+}
+
 # ── Current state banner ──────────────────────────────────────────────────────
 _show_current_state() {
   echo ""
@@ -88,6 +101,15 @@ _apply_ufw() {
     printf "  %-12s p2p %s/tcp   qnet %s (tcp+udp)\n" "${_fw_names[$i]}" "${p2p}" "${qnet}"
   done
 
+  _discover_lokinet_ports
+  if [[ "${#_fw_lokinet_ports[@]}" -gt 0 ]]; then
+    echo -e "\n\033[1mOpening lokinet relay ports...\033[0m"
+    for _lp in "${_fw_lokinet_ports[@]}"; do
+      sudo ufw allow "${_lp}/udp"
+      printf "  lokinet %s/udp\n" "${_lp}"
+    done
+  fi
+
   echo -e "\n\033[1mEnabling UFW...\033[0m"
   sudo ufw --force enable
 
@@ -115,6 +137,16 @@ _apply_iptables() {
     sudo iptables -A OUTPUT -p udp --sport "${qnet}" -j ACCEPT
     printf "  %-12s p2p %s/tcp   qnet %s (tcp+udp)\n" "${_fw_names[$i]}" "${p2p}" "${qnet}"
   done
+
+  _discover_lokinet_ports
+  if [[ "${#_fw_lokinet_ports[@]}" -gt 0 ]]; then
+    echo -e "\n\033[1mOpening lokinet relay ports [iptables]...\033[0m"
+    for _lp in "${_fw_lokinet_ports[@]}"; do
+      sudo iptables -A INPUT  -p udp --dport "${_lp}" -j ACCEPT
+      sudo iptables -A OUTPUT -p udp --sport "${_lp}" -j ACCEPT
+      printf "  lokinet %s/udp\n" "${_lp}"
+    done
+  fi
 
   sudo iptables-save  | uniq | sudo tee /etc/iptables/rules.v4 | sudo iptables-restore
   sudo ip6tables-save | uniq | sudo tee /etc/iptables/rules.v6 | sudo ip6tables-restore
@@ -146,6 +178,11 @@ _remove_ufw_rules() {
     sudo ufw delete allow "${qnet}/udp" 2>/dev/null || true
     sudo ufw delete allow "${qnet}"     2>/dev/null || true
     printf "  %-12s removed p2p %s   qnet %s\n" "${_fw_names[$i]}" "${p2p}" "${qnet}"
+  done
+  _discover_lokinet_ports
+  for _lp in "${_fw_lokinet_ports[@]}"; do
+    sudo ufw delete allow "${_lp}/udp" 2>/dev/null || true
+    printf "  lokinet      removed %s/udp\n" "${_lp}"
   done
   echo -e "\n\033[0;32mDone. UFW rules for node ports removed.\033[0m"
   echo -e "  \033[0;33mNote: UFW itself is still enabled — disable manually if no longer needed:\033[0m"
