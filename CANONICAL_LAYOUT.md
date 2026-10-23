@@ -150,6 +150,64 @@ The annotated form above is for readability only.
 
 ---
 
+## Lokinet sidecar (opt-in, non-enforcing)
+
+Lokinet support is opt-in and off by default. When enabled, each service node gets
+its own lokinet relay running as a sidecar, keyed to that SN. This is ops and
+packaging only. Nothing about it is consensus-critical, and a relay that is down
+does not affect the service node.
+
+Enable it at install time with `install.sh --lokinet`. The bootstrap RC source can
+be overridden with `install.sh --lokinet --lokinet-bootstrap <path-or-url>` (the
+default is `https://bootstrap.xeqmlabs.com/lokinet-bootstrap.signed`). This is
+Linux and systemd only; on macOS the installer skips lokinet with a warning and
+emits no plist.
+
+**How the relay gets its identity.** The relay reads the SN identity from the
+daemon over an oxend control socket rather than from any key file. When lokinet is
+enabled, the installer adds `--lmq-local-control=ipc:///var/lib/xeqm/<snodeName>/oxend.sock`
+to that SN's `ExecStart`, and the relay config sets `[lokid] enabled=true` with
+`rpc=ipc:///var/lib/xeqm/<snodeName>/oxend.sock`. There is no lokinet key file to
+back up or manage.
+
+**User model.** The relay runs as `User=xeqm` `Group=xeqm`, the same service user
+as the SN, so it can read the xeqm-owned socket inside the 0700 data directory. The
+relay needs `CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (set via
+`AmbientCapabilities`) and `DeviceAllow=/dev/net/tun rw`, because it brings up a tun
+device. For that reason the lokinet unit does not set `PrivateDevices=true` and does
+not drop those capabilities, unlike the SN unit.
+
+**Private network.** All relays join a private lokinet network with
+`netid=xeqm`. Each relay bootstraps from `add-node=/var/lib/xeqm-lokinet/<snodeName>/bootstrap.signed`,
+placed by the installer from the `--lokinet-bootstrap` source. If that RC cannot be
+obtained the installer warns but still writes the config, and doctor flags the
+missing RC.
+
+**Files and ports.** Per service node, indexed by the install order `idx` (1..N):
+
+| Item | Location / value |
+|------|------------------|
+| Config | `/etc/xeqm-lokinet/<snodeName>.ini` |
+| State dir | `/var/lib/xeqm-lokinet/<snodeName>` |
+| Bootstrap RC | `/var/lib/xeqm-lokinet/<snodeName>/bootstrap.signed` |
+| Template unit | `/etc/systemd/system/xeqm-lokinet@.service` (instance `xeqm-lokinet@<snodeName>`) |
+| Link port (inbound + public-port) | `1090 + idx` (UDP, opened in the firewall) |
+| API bind | `tcp://127.0.0.1:(1190 + idx)` (loopback only) |
+| DNS bind | `127.3.2.<idx>:53` (loopback only) |
+
+The link port is the only lokinet port opened to the outside. When the firewall is
+managed by the installer it opens `1090+idx/udp`. OCI hosts also need the VCN
+Security List and the raw iptables rule opened, the same way the SN ports are
+handled in the firewall module.
+
+**Advertisement.** Once the relay is up and connected, the daemon reports a non-zero
+`lokinet_version` in its uptime proofs. A value of `[0,0,0]` means the relay has not
+pinged the daemon yet. `doctor.sh` checks that the unit is active, the bootstrap RC
+is present, and the advertised `lokinet_version` is non-zero, and its repair action
+rewrites the config and restarts the relay.
+
+---
+
 ## Real-world impact
 
 Numbers from an actual migration of a 13-node installer-layout host running v1.0.7:

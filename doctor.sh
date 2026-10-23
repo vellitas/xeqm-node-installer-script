@@ -281,11 +281,13 @@ analyze_and_fix() {
     current_block_with_margin=0
   fi
   local -a healthy_blockchains=() stuck_blockchains=() nodata_blockchains=()
+  local -a lokinet_broken=()
 
   # ── Collect per-node data ─────────────────────────────────────────────────
   local -a d_name=() d_svc=() d_chain_state=() d_chain_col=()
   local -a d_key=() d_fw_state=() d_disk_ok=() d_disk_gb=() d_lmdb_gb=()
   local -a d_issues=() d_reg=() d_peers=() d_uptime=() d_ram_mb=()
+  local -a d_lokinet=()
 
   local _total_nodes="${#node_names[@]}" _node_idx=0
   for i in "${!node_names[@]}"; do
@@ -552,6 +554,42 @@ analyze_and_fix() {
       fi
     fi
 
+    # ─ Lokinet sidecar (opt-in, non-enforcing) ─
+    # Configured = per-SN .ini + the shared template unit both present. When
+    # configured, check the unit is active, the bootstrap RC is in place, and the
+    # daemon is advertising a non-zero lokinet_version in its uptime proof.
+    local lok_state="none" _lok_needs_repair=0
+    local _lok_conf="/etc/xeqm-lokinet/${_nname}.ini"
+    local _lok_tmpl="/etc/systemd/system/xeqm-lokinet@.service"
+    if [[ "${OS_TYPE}" != "Darwin" && -f "${_lok_conf}" && -f "${_lok_tmpl}" ]]; then
+      lok_state="ok"
+      if ! systemctl is-active --quiet "xeqm-lokinet@${_nname}" 2>/dev/null; then
+        lok_state="fail"; _lok_needs_repair=1
+        node_issue_text+="Lokinet relay not running\n"
+        node_issue_text+="→ sudo systemctl restart xeqm-lokinet@${_nname}\n\n"
+      fi
+      if [[ ! -f "/var/lib/xeqm-lokinet/${_nname}/bootstrap.signed" ]]; then
+        [[ "${lok_state}" = "ok" ]] && lok_state="warn"
+        _lok_needs_repair=1
+        node_issue_text+="# Lokinet bootstrap RC missing, relay cannot find the private network\n"
+        node_issue_text+="#   /var/lib/xeqm-lokinet/${_nname}/bootstrap.signed\n\n"
+      fi
+      if [[ "${chain_state}" = "ok" && -n "${_nrpc}" && -n "${sn_key}" ]]; then
+        local _lok_json _lok_ver
+        _lok_json=$(curl -s -m 5 "http://127.0.0.1:${_nrpc}/json_rpc" \
+          -X POST -H 'Content-Type: application/json' \
+          -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"get_service_nodes\",\
+\"params\":{\"service_node_pubkeys\":[\"${sn_key}\"]}}" 2>/dev/null) || true
+        _lok_ver=$(echo "${_lok_json}" | grep -o '"lokinet_version":\[[0-9]*,[0-9]*,[0-9]*\]' \
+          | head -1 | grep -o '[0-9]*,[0-9]*,[0-9]*' || true)
+        if [[ -z "${_lok_ver}" || "${_lok_ver}" = "0,0,0" ]]; then
+          [[ "${lok_state}" = "ok" ]] && lok_state="warn"
+          node_issue_text+="# Lokinet version not yet advertised in uptime proof (relay may still be starting)\n\n"
+        fi
+      fi
+      [[ "${_lok_needs_repair}" -eq 1 ]] && lokinet_broken+=( "${i}" )
+    fi
+
     d_name+=( "${_nname}" )
     d_svc+=( "${svc_state}" )
     d_chain_state+=( "${chain_state}" )
@@ -566,6 +604,7 @@ analyze_and_fix() {
     d_peers+=( "${peers_in}/${peers_out}" )
     d_uptime+=( "${uptime_str}" )
     d_ram_mb+=( "${ram_mb}" )
+    d_lokinet+=( "${lok_state}" )
   done
   printf "\r%-70s\r" ""
 
@@ -883,6 +922,52 @@ analyze_and_fix() {
       done
     else
       echo -e "\nSkipped. See issues above for manual steps."
+    fi
+  fi
+
+  # ── Lokinet sidecar repair ────────────────────────────────────────────────
+  # Repair = (re)write the config from the existing one + restart the relay. idx
+  # and public-ip are recovered from the current .ini (public-port = 1090+idx).
+  if [[ "${#lokinet_broken[@]}" -gt 0 ]]; then
+    echo ""
+    tput rev 2>/dev/null || true
+    printf "\033[1m  LOKINET SIDECAR REPAIR  \033[0m\n"
+    tput sgr0 2>/dev/null || true
+    local _do_lok_fix=1
+    if [[ "${doctor_config[fix_mode]}" = "interactive" ]]; then
+      if wt_available; then
+        local _lok_list=""
+        for _li in "${lokinet_broken[@]}"; do _lok_list+="${node_names[$_li]} "; done
+        wt_yesno "Repair Lokinet Relays" \
+          "These lokinet relays need attention:\n\n  ${_lok_list}\nRewrite each config and restart the relay now?" \
+          12 66 "Repair" "Skip" || _do_lok_fix=0
+      else
+        local _yn
+        read -rp $'\n\033[1mRepair lokinet relay(s) now?\e[0m [Y/n]: ' _yn
+        _yn="${_yn:-Y}"
+        [[ "${_yn,,}" != "y" ]] && _do_lok_fix=0
+      fi
+    fi
+    if [[ "${_do_lok_fix}" -eq 1 ]]; then
+      for _li in "${lokinet_broken[@]}"; do
+        local _lname="${node_names[$_li]}"
+        local _lconf="/etc/xeqm-lokinet/${_lname}.ini"
+        local _lport _lidx _lip
+        _lport=$(grep -m1 '^public-port=' "${_lconf}" 2>/dev/null | cut -d= -f2 || true)
+        _lip=$(grep -m1 '^public-ip=' "${_lconf}" 2>/dev/null | cut -d= -f2 || true)
+        if [[ -n "${_lport}" ]]; then _lidx=$(( _lport - 1090 )); else _lidx=1; fi
+        echo -e "\n\033[1mRepairing lokinet relay for '${_lname}'...\033[0m"
+        write_lokinet_config "${_lname}" "${_lidx}" "${_lip}" ""
+        install_lokinet_template_unit
+        [[ ! -f "/var/lib/xeqm-lokinet/${_lname}/bootstrap.signed" ]] && \
+          place_lokinet_bootstrap "${_lname}" "${_LOKINET_DEFAULT_BOOTSTRAP}"
+        sudo systemctl daemon-reload
+        if sudo systemctl restart "xeqm-lokinet@${_lname}" 2>/dev/null; then
+          echo -e "  \033[0;32mRestarted\033[0m xeqm-lokinet@${_lname}, re-run doctor to confirm"
+        else
+          echo -e "  \033[0;31mWARN: xeqm-lokinet@${_lname} failed to start, check journalctl\033[0m"
+        fi
+      done
     fi
   fi
 

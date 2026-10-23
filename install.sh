@@ -39,11 +39,14 @@ command_options_set=(
   [git_repository]=0
   [open_firewall]=0
   [no_open_firewall]=0
+  [lokinet]=0
+  [lokinet_bootstrap]=0
   [quiet]=0
   [force]=0
 )
 copy_binaries_option_value=
 copy_blockchain_option_value=
+lokinet_bootstrap_option_value=
 nodes_option_value=
 ports_option_value=
 version_option_value=
@@ -128,7 +131,7 @@ process_command_line_args() {
 }
 
 parse_command_line_args() {
-  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,force -- "$@")"
+  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,lokinet,lokinet-bootstrap:,force -- "$@")"
   eval set -- "${args}"
 
   while :
@@ -147,6 +150,8 @@ parse_command_line_args() {
       --git-repository)               command_options_set[git_repository]=1; git_repository_option_value="$2"; shift 2 ;;
       --open-firewall)                command_options_set[open_firewall]=1; shift ;;
       --no-open-firewall)             command_options_set[no_open_firewall]=1; shift ;;
+      --lokinet)                      command_options_set[lokinet]=1; shift ;;
+      --lokinet-bootstrap)            command_options_set[lokinet_bootstrap]=1; lokinet_bootstrap_option_value="$2"; shift 2 ;;
       --force)                        command_options_set[force]=1; shift ;;
       --)                             shift ; break ;;
       *)                              echo "Unexpected option: $1" ;
@@ -163,7 +168,7 @@ set_config_and_execute_info_commands() {
   if [[ "${command_options_set[quiet]}" -eq 1 ]]; then config[quiet_mode]=1; fi
 
   local _wz_any=0
-  for _wz_f in nodes ports copy_blockchain copy_binaries version open_firewall inspect_auto_magic; do
+  for _wz_f in nodes ports copy_blockchain copy_binaries version open_firewall lokinet lokinet_bootstrap inspect_auto_magic; do
     [[ "${command_options_set[${_wz_f}]:-0}" -eq 1 ]] && _wz_any=1 && break
   done
   if [[ "${config[quiet_mode]:-0}" -eq 0 && "${_wz_any}" -eq 0 ]] && wt_available; then
@@ -201,6 +206,12 @@ set_config_and_execute_info_commands() {
   fi
   if [[ "${command_options_set[daemon_log_level]}" -eq 1 ]]; then daemon_log_level_option_handler "${daemon_log_level_option_value}"; fi
   if [[ "${command_options_set[git_repository]}" -eq 1 ]]; then git_repository_option_handler "${git_repository_option_value}"; fi
+  if [[ "${command_options_set[lokinet_bootstrap]}" -eq 1 ]]; then
+    config[lokinet_bootstrap]="${lokinet_bootstrap_option_value}"
+  else
+    config[lokinet_bootstrap]="${_LOKINET_DEFAULT_BOOTSTRAP}"
+  fi
+  if [[ "${command_options_set[lokinet]}" -eq 1 ]]; then lokinet_option_handler; fi
   if [[ "${config[quiet_mode]}" -eq 1 ]]; then
     config[service_node_public_ip]="$(detect_public_ip)"
   else
@@ -232,7 +243,7 @@ set_config_and_execute_info_commands() {
 validate_parsed_command_line_args() {
   local valid_option_combinations=(
     "<no_options_set>"
-    "copy_blockchain copy_binaries nodes ports version daemon_no_fluffy_blocks daemon_log_level git_repository open_firewall quiet force"
+    "copy_blockchain copy_binaries nodes ports version daemon_no_fluffy_blocks daemon_log_level git_repository open_firewall lokinet lokinet_bootstrap quiet force"
     "inspect_auto_magic nodes"
     "help"
   )
@@ -375,6 +386,8 @@ nodes_option_handler() {
   while [ "${idx}" -le "${config[nodes]}" ]; do
     config["snode${idx}__copy_blockchain"]=
     config["snode${idx}__copy_binaries"]=
+    config["snode${idx}__lokinet"]=0
+    config["snode${idx}__lokinet_bootstrap"]=
     config["snode${idx}__p2p_bind_port"]=0
     config["snode${idx}__rpc_bind_port"]=0
     config["snode${idx}__quorumnet_port"]=0
@@ -435,6 +448,21 @@ prompt_binary_source() {
       2) config[binary_source]="compile" ;;
     esac
   fi
+}
+
+# Enable the opt-in lokinet relay sidecar for every SN in this install. Lokinet is
+# non-enforcing ops/packaging only (netid=xeqm, one relay per service node). The
+# bootstrap RC source is config[lokinet_bootstrap], resolved before this is called.
+lokinet_option_handler() {
+  local idx=1
+  config[lokinet]=1
+  config[lokinet_bootstrap]="${config[lokinet_bootstrap]:-${_LOKINET_DEFAULT_BOOTSTRAP}}"
+  while [ "${idx}" -le "${config[nodes]}" ]; do
+    config["snode${idx}__lokinet"]=1
+    config["snode${idx}__lokinet_bootstrap"]="${config[lokinet_bootstrap]}"
+    idx=$((idx + 1))
+  done
+  echo -e "\n\033[1mLokinet relay sidecar: enabled (netid=xeqm, one relay per service node)\033[0m"
 }
 
 blockchain_selection_menu() {
@@ -681,6 +709,10 @@ pre_install_summary() {
   [[ "${bc}" = "copy_from_snode1" ]] && bc="Copy from snode1 (first syncs, rest copy)"
   printf "  %-24s %s\n" "Blockchain:" "${bc}"
 
+  local lok="Disabled"
+  [[ "${config[lokinet]:-0}" -eq 1 ]] && lok="Enabled (netid=xeqm, one relay per node)"
+  printf "  %-24s %s\n" "Lokinet sidecar:" "${lok}"
+
   local fw="${config[firewall_mode]:-none}"
   case "${fw}" in
     ufw)      fw="UFW (auto-configure)" ;;
@@ -766,7 +798,8 @@ install_manager() {
       "${node_config[rpc_bind_port]}" \
       "${node_config[quorumnet_port]}" \
       "${config[service_node_public_ip]}" \
-      "${config[daemon_log_level]:-}"
+      "${config[daemon_log_level]:-}" \
+      "${node_config[lokinet]:-0}"
 
     svc_reload_daemon
     clear_port_if_stale "${node_config[p2p_bind_port]}"
@@ -780,6 +813,10 @@ install_manager() {
     if [[ "${config[open_firewall]:-0}" -eq 1 ]]; then
       open_firewall_for_node "${node_config[p2p_bind_port]}" "${node_config[quorumnet_port]}" || \
         echo -e "\n\033[0;33mwarning: automatic firewall setup failed. The node is installed and running; open p2p ${node_config[p2p_bind_port]}/tcp and quorumnet ${node_config[quorumnet_port]} (tcp+udp) yourself.\033[0m"
+    fi
+
+    if [[ "${node_config[lokinet]:-0}" -eq 1 ]]; then
+      install_lokinet_sidecar_for_node "${snode_name}" "${idx}" "${node_config[lokinet_bootstrap]:-}"
     fi
 
     echo -e "\n  \033[1;32m[DONE]\033[0m Service Node ${idx} (${snode_name}) installed."
@@ -807,6 +844,8 @@ generate_node_config() {
     [oxenmq_port]="${config["snode${node_id}__oxenmq_port"]}"
     [copy_blockchain]="${config["snode${node_id}__copy_blockchain"]}"
     [copy_binaries]="${config["snode${node_id}__copy_binaries"]:-}"
+    [lokinet]="${config["snode${node_id}__lokinet"]:-0}"
+    [lokinet_bootstrap]="${config["snode${node_id}__lokinet_bootstrap"]:-}"
     [binary_source]="${config[binary_source]}"
     [daemon_no_fluffy_blocks]="${config[daemon_no_fluffy_blocks]}"
     [daemon_log_level]="${config[daemon_log_level]}"
@@ -1053,6 +1092,49 @@ open_firewall_for_node() {
       sudo iptables-save | sudo tee /etc/iptables/rules.v4 >/dev/null 2>/dev/null || true
       # Second half of the OCI firewall: open the VCN Security List too.
       oci_open_vcn_ports
+    fi
+  fi
+}
+
+# install_lokinet_sidecar_for_node <snodeName> <idx> <bootstrap_src>
+# Stands up the opt-in lokinet relay for one SN: write config, place the bootstrap
+# RC, install the template unit (once), start the sidecar, and open its UDP link
+# port. Non-enforcing; a relay that fails to start never fails the install.
+install_lokinet_sidecar_for_node() {
+  local snode_name="$1"
+  local idx="$2"
+  local bootstrap_src="${3:-${_LOKINET_DEFAULT_BOOTSTRAP}}"
+
+  # Lokinet needs /dev/net/tun and systemd, Linux only. Skip with a warning on macOS.
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "\n  \033[0;33mLokinet sidecar requested but not supported on macOS, skipping for '${snode_name}'.\033[0m"
+    return 0
+  fi
+
+  echo -e "\n\033[1m  Setting up lokinet relay sidecar for ${snode_name}...\033[0m"
+
+  write_lokinet_config "${snode_name}" "${idx}" "${config[service_node_public_ip]}" "${bootstrap_src}"
+  place_lokinet_bootstrap "${snode_name}" "${bootstrap_src}"
+  install_lokinet_template_unit
+
+  sudo systemctl daemon-reload
+  if sudo systemctl enable --now "xeqm-lokinet@${snode_name}" 2>/dev/null; then
+    echo -e "  \033[0;32mLokinet relay started:\033[0m xeqm-lokinet@${snode_name}"
+  else
+    echo -e "  \033[0;33mwarning: xeqm-lokinet@${snode_name} did not start. Check: sudo journalctl -u xeqm-lokinet@${snode_name} -n 30\033[0m"
+  fi
+
+  # Open the lokinet link (UDP) port. Reuse ufw when it is the active firewall;
+  # OCI hosts additionally need the VCN Security List + iptables opened (see
+  # firewall.sh / oci_open_vcn_ports) for ports 1090+idx.
+  if [[ "${config[open_firewall]:-0}" -eq 1 ]]; then
+    local lok_port=$(( 1090 + idx ))
+    if command -v ufw >/dev/null 2>&1 && sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+      sudo ufw allow "${lok_port}/udp" >/dev/null 2>&1 \
+        && echo -e "  Firewall: opened lokinet ${lok_port}/udp (ufw)" \
+        || echo -e "  \033[0;33mwarning: could not open lokinet ${lok_port}/udp in ufw, open it manually.\033[0m"
+    else
+      echo -e "  \033[0;33mNote: open lokinet ${lok_port}/udp on this host's firewall (OCI also needs the VCN + iptables).\033[0m"
     fi
   fi
 }
@@ -1736,6 +1818,17 @@ Options:
   --no-open-firewall                    Opt out of touching the host firewall (rely on an external
                                         or provider firewall). SSH access is always preserved.
 
+  --lokinet                             Enable the opt-in lokinet relay sidecar (default off). One
+                                        relay per service node on a private network (netid=xeqm),
+                                        keyed to the SN over its oxend control socket. Non-enforcing
+                                        ops/packaging only. Linux/systemd only. Ports per node idx:
+                                        link 1090+idx/udp, api 127.0.0.1:1190+idx, dns 127.3.2.idx:53.
+
+  --lokinet-bootstrap [path|url]        Source of the lokinet bootstrap RC, fetched or copied into
+                                        each relay's state dir (default:
+                                        https://bootstrap.xeqmlabs.com/lokinet-bootstrap.signed).
+                                        Implies nothing on its own; use with --lokinet.
+
   -h  --help                            Show this help text
 
 USAGEMSG
@@ -1866,6 +1959,21 @@ wz_firewall() {
     IPTables) config[firewall_mode]='iptables'; config[open_firewall]=1 ;;
     OCI)      config[firewall_mode]='oci';      config[open_firewall]=1 ;;
     External) config[firewall_mode]='external'; config[open_firewall]=0 ;;
+  esac
+  return 0
+}
+
+wz_lokinet() {
+  local _choice
+  wt_menu "Lokinet Sidecar" "Run an opt-in lokinet relay beside each service node?\n\nPrivate network (netid=xeqm), one relay per node, non-enforcing.\nDefault is off." \
+    13 70 2 _choice \
+    "Skip"   "Do not install lokinet (default)" \
+    "Enable" "Install a lokinet relay per service node"
+  local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
+  config[lokinet_bootstrap]="${config[lokinet_bootstrap]:-${_LOKINET_DEFAULT_BOOTSTRAP}}"
+  case "${_choice}" in
+    Enable) lokinet_option_handler >/dev/null 2>&1 ;;
+    Skip)   config[lokinet]=0 ;;
   esac
   return 0
 }
@@ -2084,6 +2192,8 @@ wz_confirm() {
   _sum+="$(printf "%-12s %s\n" "Blockchain:" "${_bc}")\n"
   _sum+="$(printf "%-12s %s\n" "Public IP:"  "${config[service_node_public_ip]}")\n"
   _sum+="$(printf "%-12s %s\n" "Firewall:"   "${_fw}")\n"
+  local _lok="Disabled"; [[ "${config[lokinet]:-0}" -eq 1 ]] && _lok="Enabled (netid=xeqm)"
+  _sum+="$(printf "%-12s %s\n" "Lokinet:"    "${_lok}")\n"
   _sum+="$(printf "%-12s %s\n" "Agent:"      "${_agent_label}")\n\n"
 
   _sum+="$(printf "%-5s %-14s %-7s %s\n" "Node" "Snode" "P2P" "Quorumnet")\n"
@@ -2117,7 +2227,7 @@ wz_confirm() {
 }
 
 run_wizard() {
-  local _steps=(wz_nodes wz_binary_source wz_blockchain wz_public_ip wz_firewall wz_detect wz_agent wz_confirm)
+  local _steps=(wz_nodes wz_binary_source wz_blockchain wz_public_ip wz_firewall wz_lokinet wz_detect wz_agent wz_confirm)
   local _step=0
   while [[ ${_step} -lt ${#_steps[@]} ]]; do
     local _rc=0
