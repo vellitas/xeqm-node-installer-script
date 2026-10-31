@@ -176,14 +176,15 @@ analyze_and_fix() {
   #   Installer: User=<snode_name>, data in /home/<user>/.xeqmlabs, ports in install.conf
   local -a node_names=() node_svcs=() node_users=() node_data_dirs=()
   local -a node_rpc_ports=() node_p2p_ports=() node_qnet_ports=() node_layouts=()
+  local -a node_backends=()
 
   for unit_name in "${all_unit_names[@]}"; do
     [[ -z "${unit_name}" ]] && continue
     local snode_name="${unit_name%.service}"
     snode_name="${snode_name#xeqmnode_}"
 
-    local username layout data_dir rpc_port p2p_port qnet_port
-    rpc_port=""; p2p_port=""; qnet_port=""; data_dir=""
+    local username layout data_dir rpc_port p2p_port qnet_port backend
+    rpc_port=""; p2p_port=""; qnet_port=""; data_dir=""; backend="lmdb"
 
     if [[ "${OS_TYPE}" == "Darwin" ]]; then
       # ── macOS plist layout ────────────────────────────────────────────────
@@ -198,6 +199,8 @@ analyze_and_fix() {
       qnet_port=$(printf '%s' "${plist_args}" | grep -o -- '--quorumnet-port=[^ ]*' | cut -d= -f2 || true)
       [[ -z "${qnet_port}" && -n "${p2p_port}" ]] && qnet_port=$(( p2p_port + 2 ))
       [[ -z "${data_dir}" ]] && data_dir="${XEQM_STATE_BASE}/${snode_name}"
+      # EnvironmentVariables dict: <key>XEQM_DB_BACKEND</key><string>sqlite</string>
+      grep -A1 'XEQM_DB_BACKEND' "${plist_file}" 2>/dev/null | grep -q '<string>sqlite</string>' && backend="sqlite"
     else
       local unit_file="/etc/systemd/system/${unit_name}"
       if grep -q '^User=xeqm$' "${unit_file}" 2>/dev/null; then
@@ -212,6 +215,10 @@ analyze_and_fix() {
         qnet_port=$(echo "${exec_raw}" | grep -o -- '--quorumnet-port=[^ ;]*' | cut -d= -f2 || true)
         [[ -z "${qnet_port}" && -n "${p2p_port}" ]] && qnet_port=$(( p2p_port + 2 ))
         [[ -z "${data_dir}" ]] && data_dir="/var/lib/xeqm/${snode_name}"
+        # Environment=XEQM_DB_BACKEND=sqlite in the unit selects the SQLite backend.
+        local _env_raw
+        _env_raw=$(systemctl show "${unit_name}" -p Environment 2>/dev/null)
+        echo "${_env_raw}" | grep -q 'XEQM_DB_BACKEND=sqlite' && backend="sqlite"
       else
         # ── Installer layout ────────────────────────────────────────────────
         layout="installer"
@@ -233,6 +240,7 @@ analyze_and_fix() {
     node_p2p_ports+=( "${p2p_port}" )
     node_qnet_ports+=( "${qnet_port}" )
     node_layouts+=( "${layout}" )
+    node_backends+=( "${backend}" )
   done
 
   if [[ "${#node_names[@]}" -eq 0 ]]; then
@@ -300,6 +308,9 @@ analyze_and_fix() {
     local _np2p="${node_p2p_ports[$i]}"
     local _nqnet="${node_qnet_ports[$i]}"
     local _nlayout="${node_layouts[$i]}"
+    local _nbackend="${node_backends[$i]:-lmdb}"
+    # Path to this node's blockchain DB file, by backend (LMDB dir vs SQLite file).
+    local _nchain_db; if [[ "${_nbackend}" == "sqlite" ]]; then _nchain_db="${_ndata}/xeqm.db"; else _nchain_db="${_ndata}/lmdb/data.mdb"; fi
 
     printf "\r  \033[1mChecking [ %d / %d ]\033[0m %-20s" "${_node_idx}" "${_total_nodes}" "${_nname}"
 
@@ -396,7 +407,7 @@ analyze_and_fix() {
     done
     local user_disk_gb=0
     user_disk_gb=$(( $(df "${_data_df_path}" | awk 'END{ print $4+0 }') / 1024 / 1024 ))
-    local lmdb_db_path="${_ndata}/lmdb/data.mdb"
+    local lmdb_db_path="${_nchain_db}"
     local lmdb_gb=0
     [[ -f "${lmdb_db_path}" ]] && \
       lmdb_gb=$(( $(_stat_size "${lmdb_db_path}") / 1024 / 1024 / 1024 ))
@@ -444,7 +455,7 @@ analyze_and_fix() {
     fi
 
     if [[ -z "${blocks_done}" ]]; then
-      local lmdb_path="${_ndata}/lmdb/data.mdb"
+      local lmdb_path="${_nchain_db}"
       if [[ -f "${lmdb_path}" ]]; then
         chain_state="syncing"
         local lmdb_mb
@@ -845,34 +856,59 @@ analyze_and_fix() {
       fi
     fi
     if [[ "${_do_fix}" -eq 1 ]]; then
-      local donor_idx="${healthy_blockchains[0]}"
-      local donor_name="${node_names[${donor_idx}]}"
-      local donor_data="${node_data_dirs[${donor_idx}]}"
       for bad_idx in "${nodata_blockchains[@]}"; do
         local bad_name="${node_names[${bad_idx}]}"
         local bad_data="${node_data_dirs[${bad_idx}]}"
         local bad_svc="${node_svcs[${bad_idx}]}"
         local bad_user="${node_users[${bad_idx}]}"
         local bad_layout="${node_layouts[${bad_idx}]}"
-        echo -e "\n\033[1mFixing blockchain for '${bad_name}'...\033[0m"
+        local bad_backend="${node_backends[${bad_idx}]:-lmdb}"
+
+        # Pick a healthy donor running the SAME backend (a SQLite node needs
+        # xeqm.db, an LMDB node needs lmdb/ — they are not interchangeable).
+        local donor_idx="" _h
+        for _h in "${healthy_blockchains[@]}"; do
+          if [[ "${node_backends[${_h}]:-lmdb}" == "${bad_backend}" ]]; then donor_idx="${_h}"; break; fi
+        done
+
+        echo -e "\n\033[1mFixing ${bad_backend} blockchain for '${bad_name}'...\033[0m"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop' 2>/dev/null || true
         else
           svc_stop "${bad_name}" 2>/dev/null || true
         fi
-        echo -e "  Copying lmdb from donor '${donor_name}'... (may take a few minutes)"
-        ${_SUDO} rm -Rf "${bad_data}/lmdb"
-        # The donor daemon is running — a plain cp -R of its live LMDB yields a
-        # torn copy the bad node may refuse to open. Use xeqm-mdb_copy -c
-        # (consistent hot copy) when available; fall back to cp -R only if not.
-        if [[ -x /opt/xeqm/bin/xeqm-mdb_copy ]]; then
-          ${_SUDO} mkdir -p "${bad_data}/lmdb"
-          if ! ${_SUDO} /opt/xeqm/bin/xeqm-mdb_copy -c "${donor_data}/lmdb" "${bad_data}/lmdb" 2>/dev/null; then
-            ${_SUDO} rm -rf "${bad_data}/lmdb"; ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
-          fi
+
+        if [[ -z "${donor_idx}" ]]; then
+          echo -e "  No healthy ${bad_backend} donor on this host — fetching ${bad_backend} bootstrap instead."
+          download_bootstrap "${bad_data}" "${bad_user}" "${bad_backend}"
         else
-          ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+          local donor_name="${node_names[${donor_idx}]}"
+          local donor_data="${node_data_dirs[${donor_idx}]}"
+          if [[ "${bad_backend}" == "sqlite" ]]; then
+            echo -e "  Copying xeqm.db from donor '${donor_name}'... (may take a few minutes)"
+            [[ -f "${bad_data}/xeqm.db" ]] && ${_SUDO} rm -f "${bad_data}/xeqm.db"
+            # Live donor DB: a plain cp is torn. Use sqlite3 online .backup.
+            if command -v sqlite3 >/dev/null 2>&1; then
+              ${_SUDO} sqlite3 "${donor_data}/xeqm.db" ".backup '${bad_data}/xeqm.db'" 2>/dev/null \
+                || { echo -e "  \033[0;33mxeqm.db copy failed — fetching bootstrap.\033[0m"; download_bootstrap "${bad_data}" "${bad_user}" sqlite; }
+            else
+              echo -e "  \033[0;33msqlite3 missing — fetching bootstrap.\033[0m"; download_bootstrap "${bad_data}" "${bad_user}" sqlite
+            fi
+          else
+            echo -e "  Copying lmdb from donor '${donor_name}'... (may take a few minutes)"
+            ${_SUDO} rm -Rf "${bad_data}/lmdb"
+            # Live donor LMDB: use xeqm-mdb_copy -c (consistent hot copy), cp -R fallback.
+            if [[ -x /opt/xeqm/bin/xeqm-mdb_copy ]]; then
+              ${_SUDO} mkdir -p "${bad_data}/lmdb"
+              if ! ${_SUDO} /opt/xeqm/bin/xeqm-mdb_copy -c "${donor_data}/lmdb" "${bad_data}/lmdb" 2>/dev/null; then
+                ${_SUDO} rm -rf "${bad_data}/lmdb"; ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+              fi
+            else
+              ${_SUDO} cp -R "${donor_data}/lmdb" "${bad_data}"
+            fi
+          fi
         fi
+
         [[ "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R "${bad_user}:${bad_user}" "${bad_data}"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
@@ -906,13 +942,14 @@ analyze_and_fix() {
         local bad_svc="${node_svcs[${bad_idx}]}"
         local bad_user="${node_users[${bad_idx}]}"
         local bad_layout="${node_layouts[${bad_idx}]}"
-        echo -e "\n\033[1mFixing '${bad_name}' via bootstrap...\033[0m"
+        local bad_backend="${node_backends[${bad_idx}]:-lmdb}"
+        echo -e "\n\033[1mFixing '${bad_name}' via ${bad_backend} bootstrap...\033[0m"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh stop' 2>/dev/null || true
         else
           svc_stop "${bad_name}" 2>/dev/null || true
         fi
-        download_bootstrap "${bad_data}" "${bad_user}"
+        download_bootstrap "${bad_data}" "${bad_user}" "${bad_backend}"
         if [[ "${bad_layout}" = "installer" ]]; then
           sudo -H -u "${bad_user}" bash -c 'cd ~/xeqm-installer/ && bash xeqm-node.sh start'
         else

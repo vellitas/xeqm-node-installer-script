@@ -33,6 +33,7 @@ config=(
   [binary_source]='compile'
   [service_node_public_ip]=
   [lokinet]=0
+  [db_backend]='lmdb'
 )
 
 typeset -A installer_state
@@ -1016,6 +1017,7 @@ write_canonical_plist() {
   local qnet="$4"
   local public_ip="$5"
   local log_level="${6:-}"
+  local db_backend="${7:-lmdb}"
   local data_dir="${XEQM_STATE_BASE}/${snode_name}"
   local label="${XEQM_SVC_LABEL_PREFIX}.${snode_name}"
   local plist_path="${XEQM_SVC_DIR}/${label}.plist"
@@ -1033,6 +1035,17 @@ write_canonical_plist() {
   [[ -n "${log_level}" ]] && log_level_arg="
 		<string>--log-level</string>
 		<string>${log_level}</string>"
+
+  # Blockchain DB backend: LMDB is the daemon default; sqlite is opt-in via env.
+  local env_block=""
+  if [[ "${db_backend}" == "sqlite" ]]; then
+    env_block="
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XEQM_DB_BACKEND</key>
+		<string>sqlite</string>
+	</dict>"
+  fi
 
   cat > "${plist_path}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1054,7 +1067,7 @@ write_canonical_plist() {
 		<string>--service-node-public-ip=${public_ip}</string>
 		<string>--seed-node=seeds.xeqmlabs.com:9230</string>
 		<string>--add-priority-node=seeds.xeqmlabs.com:9230</string>${sibling_anchor_plist}${log_level_arg}
-	</array>
+	</array>${env_block}
 	<key>WorkingDirectory</key>
 	<string>${data_dir}</string>
 	<key>StandardOutPath</key>
@@ -1082,9 +1095,10 @@ write_canonical_unit() {
   local public_ip="$5"
   local log_level="${6:-}"
   local lokinet_enabled="${7:-0}"
+  local db_backend="${8:-lmdb}"
 
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
-    write_canonical_plist "${snode_name}" "${p2p}" "${rpc}" "${qnet}" "${public_ip}" "${log_level}"
+    write_canonical_plist "${snode_name}" "${p2p}" "${rpc}" "${qnet}" "${public_ip}" "${log_level}" "${db_backend}"
     return
   fi
 
@@ -1102,6 +1116,10 @@ write_canonical_unit() {
   local lokinet_control_arg=""
   [[ "${lokinet_enabled}" -eq 1 ]] && lokinet_control_arg=" --lmq-local-control=ipc://${data_dir}/oxend.sock"
 
+  # Blockchain DB backend: LMDB is the daemon default; sqlite is opt-in via env.
+  local env_line=""
+  [[ "${db_backend}" == "sqlite" ]] && env_line=$'\nEnvironment=XEQM_DB_BACKEND=sqlite'
+
   sudo tee "${unit_file}" > /dev/null <<EOF
 [Unit]
 Description=XEQMLabs Service Node (${snode_name})
@@ -1114,7 +1132,7 @@ User=xeqm
 Group=xeqm
 StateDirectory=xeqm/${snode_name}
 StateDirectoryMode=0700
-WorkingDirectory=${data_dir}
+WorkingDirectory=${data_dir}${env_line}
 ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${sibling_anchors}${opt_log_level_arg}${lokinet_control_arg}
 Restart=always
 RestartSec=15s
@@ -1542,14 +1560,27 @@ install_dependencies() {
 }
 
 # ── Bootstrap download (cached) ───────────────────────────────────────────────
-_BOOTSTRAP_CACHE="/tmp/xeqm-bootstrap-cache.tar.gz"
+_BOOTSTRAP_BASE_URL="https://bootstrap.xeqmlabs.com"
 
-# download_bootstrap <target_dir> <username>
+# download_bootstrap <target_dir> <username> [backend]
 # Downloads (or reuses cache of) the XEQM bootstrap archive and extracts it.
+# backend selects which snapshot to fetch:
+#   lmdb   (default) -> lmdb.tar.gz   (lmdb/ + sqlite.db + p2pstate.bin)
+#   sqlite           -> sqlite.tar.gz (xeqm.db + sqlite.db + ons.db + p2pstate.bin)
+# The cache file is per-backend so the freshness check never mixes the two.
 download_bootstrap() {
   local target_dir="$1"
   local username="$2"
-  local bootstrap_url="https://bootstrap.xeqmlabs.com/lmdb.tar.gz"
+  local backend="${3:-lmdb}"
+
+  local _tarball _cache
+  if [[ "${backend}" == "sqlite" ]]; then
+    _tarball="sqlite.tar.gz"; _cache="/tmp/xeqm-bootstrap-cache-sqlite.tar.gz"
+  else
+    _tarball="lmdb.tar.gz";   _cache="/tmp/xeqm-bootstrap-cache.tar.gz"
+  fi
+  local bootstrap_url="${_BOOTSTRAP_BASE_URL}/${_tarball}"
+  local _BOOTSTRAP_CACHE="${_cache}"
 
   local _need_download=1
 
@@ -1588,18 +1619,42 @@ download_bootstrap() {
   fi
 
   if [[ "${_need_download}" -eq 1 ]]; then
-    echo -e "\n\033[1mDownloading XEQM bootstrap blockchain...\033[0m"
+    echo -e "\n\033[1mDownloading XEQM ${backend} bootstrap blockchain...\033[0m"
     echo -e "  Source: ${bootstrap_url}\n"
     wget --progress=bar:force:noscroll -O "${_BOOTSTRAP_CACHE}" "${bootstrap_url}"
   fi
 
-  echo -e "\n\033[1mExtracting bootstrap to '${target_dir}'...\033[0m"
-
-  if [[ -d "${target_dir}/lmdb" ]]; then
-    local _suffix; _suffix="$(printf '%08x' $RANDOM)"
-    ${_SUDO} mv "${target_dir}/lmdb" "${target_dir}/lmdb_${_suffix}"
+  # Verify checksum against the published .sha256 (best-effort: skip if unavailable).
+  local _sum_line _expected _actual
+  _sum_line="$(wget -qO- "${bootstrap_url}.sha256" 2>/dev/null || true)"
+  _expected="${_sum_line%% *}"
+  if [[ -n "${_expected}" ]]; then
+    if command -v sha256sum >/dev/null 2>&1; then
+      _actual="$(sha256sum "${_BOOTSTRAP_CACHE}" | awk '{print $1}')"
+    else
+      _actual="$(shasum -a 256 "${_BOOTSTRAP_CACHE}" | awk '{print $1}')"
+    fi
+    if [[ "${_actual}" != "${_expected}" ]]; then
+      echo -e "  \033[1;31mChecksum mismatch\033[0m (expected ${_expected:0:16}..., got ${_actual:0:16}...)"
+      echo -e "  Removing bad cache and aborting bootstrap."
+      rm -f "${_BOOTSTRAP_CACHE}"
+      return 1
+    fi
+    echo -e "  \033[1;32mChecksum OK\033[0m (${_actual:0:16}...)"
+  else
+    echo -e "  \033[1;33mNo published checksum found — skipping verification.\033[0m"
   fi
+
+  echo -e "\n\033[1mExtracting ${backend} bootstrap to '${target_dir}'...\033[0m"
+
   ${_SUDO} mkdir -p "${target_dir}"
+  local _suffix; _suffix="$(printf '%08x' $RANDOM)"
+  if [[ "${backend}" == "sqlite" ]]; then
+    # Move aside any existing SQLite-backend blockchain file before extracting.
+    [[ -f "${target_dir}/xeqm.db" ]] && ${_SUDO} mv "${target_dir}/xeqm.db" "${target_dir}/xeqm.db_${_suffix}"
+  else
+    [[ -d "${target_dir}/lmdb" ]] && ${_SUDO} mv "${target_dir}/lmdb" "${target_dir}/lmdb_${_suffix}"
+  fi
   ${_SUDO} tar -xzf "${_BOOTSTRAP_CACHE}" -C "${target_dir}"
   [[ -n "${username}" && "${OS_TYPE}" != "Darwin" ]] && ${_SUDO} chown -R "${username}:${username}" "${target_dir}"
 

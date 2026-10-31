@@ -43,6 +43,37 @@ The canonical layout fixes five concrete problems:
 └── xeqmnode_snodeN.service
 ```
 
+Each data dir also holds `sqlite.db` and `ons.db` — the daemon's service-node-list
+and ONS state caches. These exist regardless of blockchain backend.
+
+---
+
+## Database backend (LMDB vs SQLite)
+
+The blockchain itself is stored by one of two backends, selected per unit by the
+`XEQM_DB_BACKEND` environment variable:
+
+| Backend | Env | Blockchain file in the data dir | Availability |
+|---------|-----|---------------------------------|--------------|
+| LMDB    | (unset, the default) | `lmdb/data.mdb` | all releases |
+| SQLite  | `XEQM_DB_BACKEND=sqlite` | `xeqm.db` (plus `-wal`/`-shm`) | xeqm-d v1.1.4+ |
+
+`sqlite.db` and `ons.db` are the SN-list/ONS caches and are present with either
+backend — they are not the blockchain and must not be confused with the SQLite
+blockchain backend's `xeqm.db`.
+
+The canonical unit sets the backend with an `Environment=` line in `[Service]`
+(a `<key>EnvironmentVariables</key>` dict on macOS). Because the daemon only ever
+writes inside its own data directory, `ReadWritePaths` and `ProtectSystem=strict`
+need no change for SQLite — the `xeqm.db` WAL stays inside `/var/lib/xeqm/snodeN`.
+
+Install with `install.sh --db-backend sqlite`; repair/verify with `doctor.sh`,
+which detects each node's backend from its unit and checks for the matching file
+(`xeqm.db` vs `lmdb/data.mdb`). Bootstrap snapshots are published per backend at
+`bootstrap.xeqmlabs.com` (`lmdb.tar.gz`, `sqlite.tar.gz`). The two backends are
+not interchangeable in place: switching an existing node re-syncs into a fresh
+`xeqm.db` (the old `lmdb/` is left untouched for rollback).
+
 ---
 
 ## User model
