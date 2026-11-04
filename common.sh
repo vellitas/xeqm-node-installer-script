@@ -1244,6 +1244,33 @@ EOF
   echo -e "  Lokinet template unit written: ${unit_file}"
 }
 
+# install_lokinet_logrotate : caps the lokinet relay logs. lokinet's [logging]
+# type=file has no built-in rotation, so each relay's lokinet.log grows without
+# bound (~2GB/relay, 33GB across a host, has been observed). copytruncate rotates
+# the file in place without signalling or restarting the relay, which keeps the
+# same open fd. Host-wide (glob), written once; safe to call repeatedly.
+install_lokinet_logrotate() {
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local rotate_file="/etc/logrotate.d/xeqm-lokinet"
+  ${_SUDO} tee "${rotate_file}" > /dev/null <<'EOF'
+# XEQM lokinet relay logs. lokinet (type=file) has no built-in rotation; without
+# this the per-relay lokinet.log grows unbounded. copytruncate rotates in place
+# without restarting the relay (it keeps writing to the same fd).
+/var/lib/xeqm-lokinet/*/lokinet.log {
+    daily
+    rotate 5
+    size 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+  echo -e "  Lokinet logrotate policy written: ${rotate_file}"
+}
+
 # place_lokinet_bootstrap <snodeName> <bootstrap_src>
 # Fetches (curl/wget) or copies the bootstrap RC into the SN's lokinet state dir.
 # Warns but does not fail when the RC cannot be obtained, the config is still
