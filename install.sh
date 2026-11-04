@@ -1213,6 +1213,7 @@ install_lokinet_sidecar_for_node() {
   place_lokinet_bootstrap "${snode_name}" "${bootstrap_src}"
   install_lokinet_template_unit
   install_lokinet_logrotate
+  install_journald_caps
 
   sudo systemctl daemon-reload
   if sudo systemctl enable --now "xeqm-lokinet@${snode_name}" 2>/dev/null; then

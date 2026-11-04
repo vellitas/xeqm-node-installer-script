@@ -591,6 +591,12 @@ analyze_and_fix() {
         node_issue_text+="# Lokinet log-rotation policy missing; lokinet.log can grow unbounded and fill the disk\n"
         node_issue_text+="#   /etc/logrotate.d/xeqm-lokinet\n\n"
       fi
+      if [[ ! -f /etc/systemd/journald.conf.d/90-xeqm-node-limits.conf ]]; then
+        [[ "${lok_state}" = "ok" ]] && lok_state="warn"
+        _lok_needs_repair=1
+        node_issue_text+="# journald cap missing; with lokinet type=print the journal can grow large\n"
+        node_issue_text+="#   /etc/systemd/journald.conf.d/90-xeqm-node-limits.conf\n\n"
+      fi
       if [[ "${chain_state}" = "ok" && -n "${_nrpc}" && -n "${sn_key}" ]]; then
         local _lok_json _lok_ver
         _lok_json=$(curl -s -m 5 "http://127.0.0.1:${_nrpc}/json_rpc" \
@@ -1003,6 +1009,7 @@ analyze_and_fix() {
         write_lokinet_config "${_lname}" "${_lidx}" "${_lip}" ""
         install_lokinet_template_unit
         install_lokinet_logrotate
+        install_journald_caps
         [[ ! -f "/var/lib/xeqm-lokinet/${_lname}/bootstrap.signed" ]] && \
           place_lokinet_bootstrap "${_lname}" "${_LOKINET_DEFAULT_BOOTSTRAP}"
         sudo systemctl daemon-reload

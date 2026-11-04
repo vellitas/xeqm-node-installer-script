@@ -1274,6 +1274,29 @@ EOF
   echo -e "  Lokinet logrotate policy written: ${rotate_file}"
 }
 
+# install_journald_caps : bound the systemd journal and keep free-space headroom.
+# With lokinet on type=print, relay logs flow into journald; an uncapped journal
+# can still grow large, so set an explicit cap. Host-wide, written once, safe to
+# call repeatedly. (Applies to all node logging, not just lokinet.)
+install_journald_caps() {
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local jd_dir="/etc/systemd/journald.conf.d"
+  local jd_file="${jd_dir}/90-xeqm-node-limits.conf"
+  ${_SUDO} mkdir -p "${jd_dir}"
+  ${_SUDO} tee "${jd_file}" > /dev/null <<'EOF'
+# XEQM node journald caps. lokinet logs type=print -> journald, so bound the
+# journal and keep headroom for the DB, upgrades, and rollback. Scale to volume.
+[Journal]
+SystemMaxUse=1G
+SystemKeepFree=5G
+RuntimeMaxUse=256M
+MaxRetentionSec=14day
+EOF
+  ${_SUDO} systemctl restart systemd-journald 2>/dev/null || true
+  echo -e "  journald caps written: ${jd_file}"
+}
+
 # place_lokinet_bootstrap <snodeName> <bootstrap_src>
 # Fetches (curl/wget) or copies the bootstrap RC into the SN's lokinet state dir.
 # Warns but does not fail when the RC cannot be obtained, the config is still
