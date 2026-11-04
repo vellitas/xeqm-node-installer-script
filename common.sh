@@ -1205,8 +1205,10 @@ bind=tcp://127.0.0.1:${api_port}
 [dns]
 bind=127.3.2.${idx}:53
 [logging]
-type=file
-file=${state_dir}/lokinet.log
+# lokinet's own default: log to stdout, which systemd captures into the journal
+# (bounded/rotated by journald). type=file writes plaintext with NO rotation, so
+# lokinet.log grows unbounded and fills the disk. Keep print; do not use type=file.
+type=print
 level=info
 EOF
 
