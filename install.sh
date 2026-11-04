@@ -1212,6 +1212,7 @@ install_lokinet_sidecar_for_node() {
   write_lokinet_config "${snode_name}" "${idx}" "${config[service_node_public_ip]}" "${bootstrap_src}"
   place_lokinet_bootstrap "${snode_name}" "${bootstrap_src}"
   install_lokinet_template_unit
+  install_lokinet_logrotate
 
   sudo systemctl daemon-reload
   if sudo systemctl enable --now "xeqm-lokinet@${snode_name}" 2>/dev/null; then

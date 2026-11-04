@@ -1205,8 +1205,10 @@ bind=tcp://127.0.0.1:${api_port}
 [dns]
 bind=127.3.2.${idx}:53
 [logging]
-type=file
-file=${state_dir}/lokinet.log
+# lokinet's own default: log to stdout, which systemd captures into the journal
+# (bounded/rotated by journald). type=file writes plaintext with NO rotation, so
+# lokinet.log grows unbounded and fills the disk. Keep print; do not use type=file.
+type=print
 level=info
 EOF
 
@@ -1242,6 +1244,33 @@ WantedBy=multi-user.target
 EOF
 
   echo -e "  Lokinet template unit written: ${unit_file}"
+}
+
+# install_lokinet_logrotate : caps the lokinet relay logs. lokinet's [logging]
+# type=file has no built-in rotation, so each relay's lokinet.log grows without
+# bound (~2GB/relay, 33GB across a host, has been observed). copytruncate rotates
+# the file in place without signalling or restarting the relay, which keeps the
+# same open fd. Host-wide (glob), written once; safe to call repeatedly.
+install_lokinet_logrotate() {
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local rotate_file="/etc/logrotate.d/xeqm-lokinet"
+  ${_SUDO} tee "${rotate_file}" > /dev/null <<'EOF'
+# XEQM lokinet relay logs. lokinet (type=file) has no built-in rotation; without
+# this the per-relay lokinet.log grows unbounded. copytruncate rotates in place
+# without restarting the relay (it keeps writing to the same fd).
+/var/lib/xeqm-lokinet/*/lokinet.log {
+    daily
+    rotate 5
+    size 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+  echo -e "  Lokinet logrotate policy written: ${rotate_file}"
 }
 
 # place_lokinet_bootstrap <snodeName> <bootstrap_src>
