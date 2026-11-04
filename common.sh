@@ -1206,10 +1206,11 @@ bind=tcp://127.0.0.1:${api_port}
 bind=127.3.2.${idx}:53
 [logging]
 # lokinet's own default: log to stdout, which systemd captures into the journal
-# (bounded/rotated by journald). type=file writes plaintext with NO rotation, so
-# lokinet.log grows unbounded and fills the disk. Keep print; do not use type=file.
+# (bounded/rotated by journald -- cap it in /etc/systemd/journald.conf.d). type=file
+# writes plaintext with NO rotation, so lokinet.log grows unbounded and fills the
+# disk. Keep print; do not use type=file. level=warn is the production relay level.
 type=print
-level=info
+level=warn
 EOF
 
   echo -e "  Lokinet config written: ${conf_file}  (link ${link_port}/udp, api 127.0.0.1:${api_port}, dns 127.3.2.${idx}:53)"
