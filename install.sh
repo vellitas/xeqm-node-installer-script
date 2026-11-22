@@ -42,13 +42,19 @@ command_options_set=(
   [no_open_firewall]=0
   [lokinet]=0
   [lokinet_bootstrap]=0
+  [session_router]=0
+  [session_router_bootstrap]=0
+  [chain_model]=0
+  [oracle]=0
   [quiet]=0
   [force]=0
 )
 copy_binaries_option_value=
 copy_blockchain_option_value=
 lokinet_bootstrap_option_value=
+session_router_bootstrap_option_value=
 db_backend_option_value=
+chain_model_option_value=
 nodes_option_value=
 ports_option_value=
 version_option_value=
@@ -133,7 +139,7 @@ process_command_line_args() {
 }
 
 parse_command_line_args() {
-  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,db-backend:,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,lokinet,lokinet-bootstrap:,force -- "$@")"
+  args="$(getopt -a -n installer -o "hib:c:n:p:qv:" --long help,inspect-auto-magic,copy-binaries:,copy-blockchain:,db-backend:,chain-model:,oracle,nodes:,ports:,quiet,version:,set-daemon-log-level:,set-daemon-no-fluffy-blocks,git-repository:,open-firewall,no-open-firewall,lokinet,lokinet-bootstrap:,session-router,session-router-bootstrap:,force -- "$@")"
   eval set -- "${args}"
 
   while :
@@ -155,6 +161,10 @@ parse_command_line_args() {
       --no-open-firewall)             command_options_set[no_open_firewall]=1; shift ;;
       --lokinet)                      command_options_set[lokinet]=1; shift ;;
       --lokinet-bootstrap)            command_options_set[lokinet_bootstrap]=1; lokinet_bootstrap_option_value="$2"; shift 2 ;;
+      --session-router)               command_options_set[session_router]=1; shift ;;
+      --session-router-bootstrap)     command_options_set[session_router_bootstrap]=1; session_router_bootstrap_option_value="$2"; shift 2 ;;
+      --chain-model)                  command_options_set[chain_model]=1; chain_model_option_value="$2"; shift 2 ;;
+      --oracle)                       command_options_set[oracle]=1; shift ;;
       --force)                        command_options_set[force]=1; shift ;;
       --)                             shift ; break ;;
       *)                              echo "Unexpected option: $1" ;
@@ -171,12 +181,27 @@ set_config_and_execute_info_commands() {
   if [[ "${command_options_set[quiet]}" -eq 1 ]]; then config[quiet_mode]=1; fi
 
   local _wz_any=0
-  for _wz_f in nodes ports copy_blockchain db_backend copy_binaries version open_firewall lokinet lokinet_bootstrap inspect_auto_magic; do
+  for _wz_f in nodes ports copy_blockchain db_backend chain_model oracle copy_binaries version open_firewall lokinet lokinet_bootstrap session_router session_router_bootstrap inspect_auto_magic; do
     [[ "${command_options_set[${_wz_f}]:-0}" -eq 1 ]] && _wz_any=1 && break
   done
   if [[ "${config[quiet_mode]:-0}" -eq 0 && "${_wz_any}" -eq 0 ]] && wt_available; then
     run_wizard
     return 0
+  fi
+
+  # Chain model + optional oracle are resolved BEFORE the node-count prompt,
+  # since the capacity estimate depends on both.
+  if [[ "${command_options_set[chain_model]}" -eq 1 ]]; then
+    chain_model_option_handler "${chain_model_option_value}"
+  elif [[ "${config[quiet_mode]:-0}" -eq 1 ]]; then
+    config[chain_model]="independent"
+  else
+    chain_model_selection_menu
+  fi
+  if [[ "${command_options_set[oracle]}" -eq 1 ]]; then
+    oracle_option_handler
+  else
+    config[oracle]="${config[oracle]:-0}"
   fi
 
   if [[ "${command_options_set[nodes]}" -eq 1 ]]; then
@@ -221,7 +246,19 @@ set_config_and_execute_info_commands() {
   else
     config[lokinet_bootstrap]="${_LOKINET_DEFAULT_BOOTSTRAP}"
   fi
+  if [[ "${command_options_set[session_router_bootstrap]}" -eq 1 ]]; then
+    config[session_router_bootstrap]="${session_router_bootstrap_option_value}"
+  else
+    config[session_router_bootstrap]="${_SESSION_ROUTER_DEFAULT_BOOTSTRAP}"
+  fi
+  # Session Router and classic lokinet both occupy the single routing-sidecar role
+  # and both claim the daemon's lmq-local-control socket; refuse to enable both.
+  if [[ "${command_options_set[session_router]}" -eq 1 && "${command_options_set[lokinet]}" -eq 1 ]]; then
+    echo -e "\n\033[0;31merror: --session-router and --lokinet are mutually exclusive (one routing sidecar per node). Session Router is the current layer; lokinet was retired at the 2026-11-04 cutover.\033[0m\n" >&2
+    exit 1
+  fi
   if [[ "${command_options_set[lokinet]}" -eq 1 ]]; then lokinet_option_handler; fi
+  if [[ "${command_options_set[session_router]}" -eq 1 ]]; then session_router_option_handler; fi
   if [[ "${config[quiet_mode]}" -eq 1 ]]; then
     config[service_node_public_ip]="$(detect_public_ip)"
   else
@@ -253,7 +290,7 @@ set_config_and_execute_info_commands() {
 validate_parsed_command_line_args() {
   local valid_option_combinations=(
     "<no_options_set>"
-    "copy_blockchain db_backend copy_binaries nodes ports version daemon_no_fluffy_blocks daemon_log_level git_repository open_firewall lokinet lokinet_bootstrap quiet force"
+    "copy_blockchain db_backend chain_model oracle copy_binaries nodes ports version daemon_no_fluffy_blocks daemon_log_level git_repository open_firewall lokinet lokinet_bootstrap session_router session_router_bootstrap quiet force"
     "inspect_auto_magic nodes"
     "help"
   )
@@ -286,37 +323,67 @@ _node_override_count() {
   fi
 }
 
-# Canonical-layout capacity formula:
-#   RAM: 600 MB/node (peak quorum load, not idle RSS), 1.5 GB system reserve
-#   Disk: 1.5 GB/node, 5 GB system reserve
-#   CPU: 1 GHz-core per node — cores × MHz/1000 — penalises slow clocks (e.g. N3450@1.1GHz=4)
+# Capacity formula — revised 2026-11-05 for the Session-Router + optional
+# shared-per-host-chain + optional EXIOM-Oracle-sidecar architecture.
+# Budgets are PEAK (not idle RSS), grounded in fleet measurements.
+#
+# Each node = 1 SN daemon + 1 Session Router sidecar (SR folded into the per-node
+# RAM/CPU budgets; SR count always equals SN count). An optional EXIOM Oracle
+# sidecar runs one-per-SN when selected.
+#
+# CPU is a PHYSICAL-CORE comfort cap, NOT aggregate GHz. Fleet data shows SN-per-
+# core (not clock sum) predicts Pulse-quorum contention: maple runs 2.5 SN/core at
+# load ~1, arm pubnodes run 4-5/core, and the one contended host's load was host
+# overhead, not clock. Steady load understates the quorum burst, so this is a
+# comfort floor; the hidden override bypasses it.
+#
+# Chain model (config[chain_model], default "independent"):
+#   independent : each SN keeps its own chain  -> RAM 550 MB/node, disk 1.5 GB/node
+#   shared      : one shared-chain writer + readonly readers
+#                 -> RAM 250 MB/node + 1 GB host, disk 0.4 GB/node + 6 GB host chain,
+#                    and 1 physical core reserved for the writer
+# Oracle sidecar (config[oracle]=1): +150 MB/node and ~15% fewer SN per core.
 _calculate_max_nodes() {
   local _total_ram_mb=$(( system_info[memory] / 1024 ))
   local _free_disk_mb=$(( system_info[free_space_var_lib] / 1024 ))
+  local _model="${config[chain_model]:-independent}"
+  local _oracle="${config[oracle]:-0}"
 
-  # nproc is Linux/GNU coreutils only; macOS uses sysctl
-  local _ncpu
+  # PHYSICAL cores (not hyperthreads) — the binding axis for Pulse-burst scheduling.
+  local _phys
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
-    _ncpu="$(sysctl -n hw.logicalcpu 2>/dev/null || echo 1)"
+    _phys="$(sysctl -n hw.physicalcpu 2>/dev/null || echo 1)"
   else
-    _ncpu="$(nproc 2>/dev/null || echo 1)"
+    _phys="$(lscpu -p=CORE 2>/dev/null | grep -vc '^#')"
+    [[ "${_phys}" =~ ^[0-9]+$ && "${_phys}" -ge 1 ]] || _phys="$(nproc 2>/dev/null || echo 1)"
+  fi
+  [[ "${_phys}" =~ ^[0-9]+$ && "${_phys}" -ge 1 ]] || _phys=1
+
+  # Per-node + host budgets by model. _density_x10 = SN per physical core, x10 for integer math.
+  local _ram_node _disk_node _ram_host _disk_host _density_x10 _cpu_reserve_cores
+  # _density_x10: SN per physical core x10. Tune THIS one value for more/less
+  # conservative CPU caps. 40/45 is arm-matching: arm pubnodes empirically run
+  # 4-5 SN/core (pn-1 = 8 on 2 cores, oci-seed-2 = 10 on 2); x86 maple runs 2.5/core
+  # with headroom. This advertises up to ~4/core, so capable x86 boxes get generous
+  # caps too — the "hardware estimate, actual depends on workload" note and the
+  # hidden override are the backstops for Pulse-burst-sensitive hosts.
+  if [[ "${_model}" == "shared" ]]; then
+    _ram_node=250; _disk_node=400;  _ram_host=2560;          _disk_host=$((5120 + 6144)); _density_x10=45; _cpu_reserve_cores=1
+  else
+    _ram_node=550; _disk_node=1536; _ram_host=1536;          _disk_host=5120;             _density_x10=40; _cpu_reserve_cores=0
+  fi
+  if [[ "${_oracle}" == "1" ]]; then
+    _ram_node=$(( _ram_node + 150 ))
+    _density_x10=$(( _density_x10 * 85 / 100 ))
   fi
 
-  # Read CPU MHz: macOS exposes it via sysctl (hw.cpufrequency in Hz); Linux via /proc/cpuinfo
-  local _cpu_mhz=2000
-  local _raw_mhz
-  if [[ "${OS_TYPE}" == "Darwin" ]]; then
-    _raw_mhz="$(sysctl -n hw.cpufrequency 2>/dev/null | awk '{printf "%d", $1/1000000}' || true)"
-  else
-    _raw_mhz="$(grep -m1 'cpu MHz' /proc/cpuinfo 2>/dev/null | awk '{printf "%d", $4}' || true)"
-  fi
-  [[ "${_raw_mhz}" =~ ^[0-9]+$ && "${_raw_mhz}" -gt 0 ]] && _cpu_mhz="${_raw_mhz}"
-  local _ghz_cores=$(( _ncpu * _cpu_mhz / 1000 ))
-  [[ "${_ghz_cores}" -lt 1 ]] && _ghz_cores=1
-
-  _max_by_ram=$(( (_total_ram_mb - 1536) / 600 ))
-  _max_by_disk=$(( (_free_disk_mb - 5120) / 1536 ))
-  _max_by_cpu="${_ghz_cores}"
+  local _usable_cores=$(( _phys - _cpu_reserve_cores )); [[ "${_usable_cores}" -lt 1 ]] && _usable_cores=1
+  _max_by_ram=$(( (_total_ram_mb - _ram_host) / _ram_node ))
+  _max_by_disk=$(( (_free_disk_mb - _disk_host) / _disk_node ))
+  _max_by_cpu=$(( _usable_cores * _density_x10 / 10 ))
+  [[ "${_max_by_ram}"  -lt 0 ]] && _max_by_ram=0
+  [[ "${_max_by_disk}" -lt 0 ]] && _max_by_disk=0
+  [[ "${_max_by_cpu}"  -lt 0 ]] && _max_by_cpu=0
 
   # These are TOTAL capacity. Subtract already-installed service nodes so the
   # numbers represent ADDITIONAL capacity (floor at 0 — a full box offers 0 more).
@@ -331,6 +398,7 @@ _calculate_max_nodes() {
   _max_by_disk=$(( _max_by_disk - _existing_nodes )); [[ "${_max_by_disk}" -lt 0 ]] && _max_by_disk=0
   _max_by_cpu=$((  _max_by_cpu  - _existing_nodes )); [[ "${_max_by_cpu}"  -lt 0 ]] && _max_by_cpu=0
 
+  local _oralbl=""; [[ "${_oracle}" == "1" ]] && _oralbl=", +oracle"
   _max_nodes="${_max_by_ram}"
   _limit_reason="RAM"
   if [[ "${_max_by_disk}" -lt "${_max_nodes}" ]]; then
@@ -339,7 +407,7 @@ _calculate_max_nodes() {
   fi
   if [[ "${_max_by_cpu}" -lt "${_max_nodes}" ]]; then
     _max_nodes="${_max_by_cpu}"
-    _limit_reason="CPU (${_ncpu} cores × ${_cpu_mhz} MHz)"
+    _limit_reason="CPU (${_phys} physical cores, ${_model} model${_oralbl})"
   fi
 }
 
@@ -399,6 +467,8 @@ nodes_option_handler() {
     config["snode${idx}__copy_binaries"]=
     config["snode${idx}__lokinet"]=0
     config["snode${idx}__lokinet_bootstrap"]=
+    config["snode${idx}__session_router"]=0
+    config["snode${idx}__session_router_bootstrap"]=
     config["snode${idx}__p2p_bind_port"]=0
     config["snode${idx}__rpc_bind_port"]=0
     config["snode${idx}__quorumnet_port"]=0
@@ -476,6 +546,22 @@ lokinet_option_handler() {
   echo -e "\n\033[1mLokinet relay sidecar: enabled (netid=xeqm, one relay per service node)\033[0m"
 }
 
+# Enable the Session Router sidecar for every SN in this install. SR is the current
+# routing layer (it replaced lokinet at the 2026-11-04 cutover), non-enforcing
+# (netid=xeqm, one relay per service node). The bootstrap RC source is
+# config[session_router_bootstrap], resolved before this is called.
+session_router_option_handler() {
+  local idx=1
+  config[session_router]=1
+  config[session_router_bootstrap]="${config[session_router_bootstrap]:-${_SESSION_ROUTER_DEFAULT_BOOTSTRAP}}"
+  while [ "${idx}" -le "${config[nodes]}" ]; do
+    config["snode${idx}__session_router"]=1
+    config["snode${idx}__session_router_bootstrap"]="${config[session_router_bootstrap]}"
+    idx=$((idx + 1))
+  done
+  echo -e "\n\033[1mSession Router sidecar: enabled (netid=xeqm, one relay per service node)\033[0m"
+}
+
 # Minimum daemon version that understands XEQM_DB_BACKEND=sqlite.
 _SQLITE_MIN_VERSION='1.1.4'
 
@@ -528,6 +614,36 @@ db_backend_selection_menu() {
     1) db_backend_option_handler "lmdb" ;;
     2) db_backend_option_handler "sqlite" ;;
   esac
+}
+
+# Chain model: independent (each SN its own chain) vs shared (one per-host chain,
+# 1 writer + read-only nodes). Feeds the capacity estimate; see _calculate_max_nodes.
+chain_model_option_handler() {
+  local v="$1"
+  case "${v}" in
+    independent|shared) ;;
+    *) echo -e "\n\033[0;33merror: invalid --chain-model '${v}' (expected independent or shared)\033[0m\n"
+       install_usage; exit 1 ;;
+  esac
+  config[chain_model]="${v}"
+  echo -e "\n\033[1mChain model: ${v}\033[0m"
+}
+
+chain_model_selection_menu() {
+  local choice
+  prompt_menu "How should the service node(s) store the blockchain?" choice 1 \
+    "Independent  (each node keeps its own chain — default)" \
+    "Shared       (one per-host chain: 1 writer + read-only nodes)"
+  case "${choice}" in
+    1) chain_model_option_handler "independent" ;;
+    2) chain_model_option_handler "shared" ;;
+  esac
+}
+
+# Optional EXIOM Oracle sidecar, one per service node (opt-in).
+oracle_option_handler() {
+  config[oracle]=1
+  echo -e "\n\033[1mEXIOM Oracle sidecar: enabled (one per service node)\033[0m"
 }
 
 blockchain_selection_menu() {
@@ -775,9 +891,12 @@ pre_install_summary() {
   printf "  %-24s %s\n" "Blockchain:" "${bc}"
   printf "  %-24s %s\n" "DB backend:" "${config[db_backend]:-lmdb}"
 
+  local sr="Disabled"
+  [[ "${config[session_router]:-0}" -eq 1 ]] && sr="Enabled (netid=xeqm, one relay per node)"
+  printf "  %-24s %s\n" "Session Router sidecar:" "${sr}"
   local lok="Disabled"
   [[ "${config[lokinet]:-0}" -eq 1 ]] && lok="Enabled (netid=xeqm, one relay per node)"
-  printf "  %-24s %s\n" "Lokinet sidecar:" "${lok}"
+  printf "  %-24s %s\n" "Lokinet sidecar (legacy):" "${lok}"
 
   local fw="${config[firewall_mode]:-none}"
   case "${fw}" in
@@ -866,7 +985,8 @@ install_manager() {
       "${config[service_node_public_ip]}" \
       "${config[daemon_log_level]:-}" \
       "${node_config[lokinet]:-0}" \
-      "${node_config[db_backend]:-lmdb}"
+      "${node_config[db_backend]:-lmdb}" \
+      "${node_config[session_router]:-0}"
 
     svc_reload_daemon
     clear_port_if_stale "${node_config[p2p_bind_port]}"
@@ -884,6 +1004,10 @@ install_manager() {
 
     if [[ "${node_config[lokinet]:-0}" -eq 1 ]]; then
       install_lokinet_sidecar_for_node "${snode_name}" "${idx}" "${node_config[lokinet_bootstrap]:-}"
+    fi
+
+    if [[ "${node_config[session_router]:-0}" -eq 1 ]]; then
+      install_session_router_sidecar_for_node "${snode_name}" "${idx}" "${node_config[session_router_bootstrap]:-}"
     fi
 
     echo -e "\n  \033[1;32m[DONE]\033[0m Service Node ${idx} (${snode_name}) installed."
@@ -914,6 +1038,8 @@ generate_node_config() {
     [copy_binaries]="${config["snode${node_id}__copy_binaries"]:-}"
     [lokinet]="${config["snode${node_id}__lokinet"]:-0}"
     [lokinet_bootstrap]="${config["snode${node_id}__lokinet_bootstrap"]:-}"
+    [session_router]="${config["snode${node_id}__session_router"]:-0}"
+    [session_router_bootstrap]="${config["snode${node_id}__session_router_bootstrap"]:-}"
     [binary_source]="${config[binary_source]}"
     [daemon_no_fluffy_blocks]="${config[daemon_no_fluffy_blocks]}"
     [daemon_log_level]="${config[daemon_log_level]}"
@@ -1231,6 +1357,62 @@ install_lokinet_sidecar_for_node() {
         || echo -e "  \033[0;33mwarning: could not open lokinet ${lok_port}/udp in ufw, open it manually.\033[0m"
     else
       echo -e "  \033[0;33mNote: open lokinet ${lok_port}/udp on this host's firewall (OCI also needs the VCN + iptables).\033[0m"
+    fi
+  fi
+}
+
+# install_session_router_sidecar_for_node <snodeName> <idx> <bootstrap_src>
+# Stands up the Session Router relay for one SN: write config, place the shared
+# bootstrap RC, install the template unit (once), enable+start the sidecar, and
+# open its UDP relay port. Non-enforcing; a relay that fails to start never fails
+# the install. The daemon unit already carries --lmq-local-control (written by
+# write_canonical_unit when SR is enabled), so the admin socket exists and no SN
+# restart is needed.
+install_session_router_sidecar_for_node() {
+  local snode_name="$1"
+  local idx="$2"
+  local bootstrap_src="${3:-${_SESSION_ROUTER_DEFAULT_BOOTSTRAP}}"
+
+  # Session Router needs /dev/net/tun and systemd, Linux only. Skip on macOS.
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "\n  \033[0;33mSession Router sidecar requested but not supported on macOS, skipping for '${snode_name}'.\033[0m"
+    return 0
+  fi
+
+  echo -e "\n\033[1m  Setting up Session Router relay sidecar for ${snode_name}...\033[0m"
+
+  write_session_router_config "${snode_name}" "${idx}" "${config[service_node_public_ip]}"
+  place_session_router_bootstrap "${bootstrap_src}" || true
+  install_session_router_template_unit
+
+  sudo systemctl daemon-reload
+
+  # The SR binary is built and published separately from the core release bundle
+  # (it is not in the xeqm-core release archive), so it may be absent on a fresh
+  # install. Don't enable a crash-looping unit: write everything, then either
+  # start it or tell the operator exactly how to finish once the binary is staged.
+  if ! sudo test -x "${_SR_BIN}"; then
+    echo -e "  \033[0;33mSession Router binary not found at ${_SR_BIN}.\033[0m"
+    echo -e "  \033[0;33m  Config + unit are written. Stage the arch-matched session-router binary\033[0m"
+    echo -e "  \033[0;33m  there (see the Session Router section of README.md), then run:\033[0m"
+    echo -e "  \033[0;33m    sudo systemctl enable --now xeqm-session-router@${snode_name}\033[0m"
+  elif sudo systemctl enable --now "xeqm-session-router@${snode_name}" 2>/dev/null; then
+    echo -e "  \033[0;32mSession Router relay started:\033[0m xeqm-session-router@${snode_name}"
+  else
+    echo -e "  \033[0;33mwarning: xeqm-session-router@${snode_name} did not start. Check: sudo journalctl -u xeqm-session-router@${snode_name} -n 30\033[0m"
+  fi
+
+  # Open the SR relay (UDP) port = 1190+idx. Reuse ufw when it is the active
+  # firewall; OCI hosts additionally need the VCN Security List + iptables opened
+  # (see firewall.sh / oci_open_vcn_ports) for the same port.
+  if [[ "${config[open_firewall]:-0}" -eq 1 ]]; then
+    local sr_port=$(( 1190 + idx ))
+    if command -v ufw >/dev/null 2>&1 && sudo ufw status 2>/dev/null | grep -q '^Status: active'; then
+      sudo ufw allow "${sr_port}/udp" >/dev/null 2>&1 \
+        && echo -e "  Firewall: opened Session Router ${sr_port}/udp (ufw)" \
+        || echo -e "  \033[0;33mwarning: could not open Session Router ${sr_port}/udp in ufw, open it manually.\033[0m"
+    else
+      echo -e "  \033[0;33mNote: open Session Router ${sr_port}/udp on this host's firewall (OCI also needs the VCN + iptables).\033[0m"
     fi
   fi
 }
@@ -1921,11 +2103,28 @@ Options:
   --no-open-firewall                    Opt out of touching the host firewall (rely on an external
                                         or provider firewall). SSH access is always preserved.
 
-  --lokinet                             Enable the opt-in lokinet relay sidecar (default off). One
-                                        relay per service node on a private network (netid=xeqm),
-                                        keyed to the SN over its oxend control socket. Non-enforcing
-                                        ops/packaging only. Linux/systemd only. Ports per node idx:
-                                        link 1090+idx/udp, api 127.0.0.1:1190+idx, dns 127.3.2.idx:53.
+  --session-router                      Enable the Session Router relay sidecar (default off). This
+                                        is the current routing layer; it replaced lokinet at the
+                                        2026-11-04 cutover. One relay per service node on a private
+                                        network (netid=xeqm), keyed to the SN over its oxend
+                                        lmq-local-control socket. Non-enforcing. Linux/systemd only.
+                                        Relay port per node idx: 1190+idx/udp. Mutually exclusive
+                                        with --lokinet. The session-router binary ships separately
+                                        from the core release; if absent at /opt/xeqm/bin, the config
+                                        and unit are written and the installer prints how to finish.
+
+  --session-router-bootstrap [path|url] Source of the Session Router bootstrap RC, fetched or copied
+                                        into ${_SR_BOOTSTRAP_FILE}
+                                        (default convention URL, not yet published). Implies nothing
+                                        on its own; use with --session-router.
+
+  --lokinet                             Legacy. Enable the opt-in lokinet relay sidecar (default off),
+                                        retired as the fleet routing layer at the 2026-11-04 Session
+                                        Router cutover. One relay per service node on a private
+                                        network (netid=xeqm), keyed to the SN over its oxend control
+                                        socket. Non-enforcing. Linux/systemd only. Mutually exclusive
+                                        with --session-router. Ports per node idx: link 1090+idx/udp,
+                                        api 127.0.0.1:1190+idx, dns 127.3.2.idx:53.
 
   --lokinet-bootstrap [path|url]        Source of the lokinet bootstrap RC, fetched or copied into
                                         each relay's state dir (default:
@@ -2036,6 +2235,34 @@ wz_db_backend() {
   return 0
 }
 
+wz_chain_model() {
+  local _choice
+  wt_menu "Chain Model" "How should the service node(s) store the blockchain?\n\nIndependent: each node keeps its own chain (simplest; more RAM/disk per node).\nShared: one per-host chain (1 writer + read-only nodes) — lighter at higher\nnode counts. This choice changes the node-count estimate on the next screen." \
+    15 74 2 _choice \
+    "Independent" "Each node its own chain (default)" \
+    "Shared"      "One shared per-host chain (writer + readers)"
+  local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
+  case "${_choice}" in
+    Independent) chain_model_option_handler "independent" >/dev/null 2>&1 ;;
+    Shared)      chain_model_option_handler "shared"      >/dev/null 2>&1 ;;
+  esac
+  return 0
+}
+
+wz_oracle() {
+  local _choice
+  wt_menu "EXIOM Oracle Sidecar" "Run an optional EXIOM Oracle sidecar beside each service node?\n\nOne sidecar per node; adds a little RAM/CPU per node and lowers the\nnode-count estimate. Default is off." \
+    13 72 2 _choice \
+    "Skip"   "Do not run the oracle sidecar (default)" \
+    "Enable" "Run one EXIOM Oracle sidecar per service node"
+  local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
+  case "${_choice}" in
+    Enable) oracle_option_handler >/dev/null 2>&1 ;;
+    Skip)   config[oracle]=0 ;;
+  esac
+  return 0
+}
+
 wz_public_ip() {
   local _detected _val
   _detected="$(detect_public_ip)"
@@ -2080,17 +2307,20 @@ wz_firewall() {
   return 0
 }
 
-wz_lokinet() {
+wz_routing_sidecar() {
   local _choice
-  wt_menu "Lokinet Sidecar" "Run an opt-in lokinet relay beside each service node?\n\nPrivate network (netid=xeqm), one relay per node, non-enforcing.\nDefault is off." \
-    13 70 2 _choice \
-    "Skip"   "Do not install lokinet (default)" \
-    "Enable" "Install a lokinet relay per service node"
+  wt_menu "Routing Sidecar" "Run a routing relay beside each service node?\n\nPrivate network (netid=xeqm), one relay per node, non-enforcing.\nSession Router is the current layer; lokinet is legacy. Default is off." \
+    14 70 3 _choice \
+    "SessionRouter" "Session Router relay per node (recommended)" \
+    "Lokinet"       "Legacy lokinet relay per node (retired)" \
+    "Skip"          "Do not install a routing sidecar (default)"
   local _rc=$?; [[ ${_rc} -ne 0 ]] && return ${_rc}
   config[lokinet_bootstrap]="${config[lokinet_bootstrap]:-${_LOKINET_DEFAULT_BOOTSTRAP}}"
+  config[session_router_bootstrap]="${config[session_router_bootstrap]:-${_SESSION_ROUTER_DEFAULT_BOOTSTRAP}}"
   case "${_choice}" in
-    Enable) lokinet_option_handler >/dev/null 2>&1 ;;
-    Skip)   config[lokinet]=0 ;;
+    SessionRouter) config[lokinet]=0; session_router_option_handler >/dev/null 2>&1 ;;
+    Lokinet)       config[session_router]=0; lokinet_option_handler >/dev/null 2>&1 ;;
+    Skip)          config[lokinet]=0; config[session_router]=0 ;;
   esac
   return 0
 }
@@ -2310,10 +2540,13 @@ wz_confirm() {
   _sum+="$(printf "%-12s %s\n" "DB backend:" "${config[db_backend]:-lmdb}")\n"
   _sum+="$(printf "%-12s %s\n" "Public IP:"  "${config[service_node_public_ip]}")\n"
   _sum+="$(printf "%-12s %s\n" "Firewall:"   "${_fw}")\n"
-  local _lok="Disabled"; [[ "${config[lokinet]:-0}" -eq 1 ]] && _lok="Enabled (netid=xeqm)"
-  _sum+="$(printf "%-12s %s\n" "Lokinet:"    "${_lok}")\n"
+  local _routing="Disabled"
+  [[ "${config[session_router]:-0}" -eq 1 ]] && _routing="Session Router (netid=xeqm)"
+  [[ "${config[lokinet]:-0}" -eq 1 ]] && _routing="Lokinet, legacy (netid=xeqm)"
+  _sum+="$(printf "%-12s %s\n" "Sidecar:"    "${_routing}")\n"
   _sum+="$(printf "%-12s %s\n" "Agent:"      "${_agent_label}")\n\n"
 
+  _sum+="Chain model: ${config[chain_model]:-independent}    Oracle sidecar: $([[ "${config[oracle]:-0}" == "1" ]] && echo on || echo off)\n\n"
   _sum+="$(printf "%-5s %-14s %-7s %s\n" "Node" "Snode" "P2P" "Quorumnet")\n"
   _sum+="$(printf "%-5s %-14s %-7s %s\n" "────" "──────────────" "──────" "─────────")\n"
   local _i=1
@@ -2345,7 +2578,7 @@ wz_confirm() {
 }
 
 run_wizard() {
-  local _steps=(wz_nodes wz_binary_source wz_blockchain wz_db_backend wz_public_ip wz_firewall wz_lokinet wz_detect wz_agent wz_confirm)
+  local _steps=(wz_chain_model wz_oracle wz_nodes wz_binary_source wz_blockchain wz_db_backend wz_public_ip wz_firewall wz_routing_sidecar wz_detect wz_agent wz_confirm)
   local _step=0
   while [[ ${_step} -lt ${#_steps[@]} ]]; do
     local _rc=0

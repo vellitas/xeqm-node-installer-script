@@ -1096,6 +1096,7 @@ write_canonical_unit() {
   local log_level="${6:-}"
   local lokinet_enabled="${7:-0}"
   local db_backend="${8:-lmdb}"
+  local session_router_enabled="${9:-0}"
 
   if [[ "${OS_TYPE}" == "Darwin" ]]; then
     write_canonical_plist "${snode_name}" "${p2p}" "${rpc}" "${qnet}" "${public_ip}" "${log_level}" "${db_backend}"
@@ -1111,10 +1112,15 @@ write_canonical_unit() {
   local sibling_anchors
   sibling_anchors="$(local_sibling_anchor_args "${p2p}")"
 
-  # Lokinet sidecar reads this SN's identity over the oxend control socket, so
-  # expose it only when lokinet is enabled for this install (opt-in, non-enforcing).
-  local lokinet_control_arg=""
-  [[ "${lokinet_enabled}" -eq 1 ]] && lokinet_control_arg=" --lmq-local-control=ipc://${data_dir}/oxend.sock"
+  # The routing sidecar (Session Router, or legacy lokinet) reads this SN's identity
+  # over the oxend lmq-local-control socket, so expose it whenever either sidecar is
+  # enabled for this install (opt-in, non-enforcing). Writing the flag into the unit
+  # up front means the admin socket exists on the first daemon start and the sidecar
+  # attaches with no later restart — the gap that otherwise strands a freshly-added
+  # node without a reporting sidecar.
+  local sidecar_control_arg=""
+  [[ "${lokinet_enabled}" -eq 1 || "${session_router_enabled}" -eq 1 ]] \
+    && sidecar_control_arg=" --lmq-local-control=ipc://${data_dir}/oxend.sock"
 
   # Blockchain DB backend: LMDB is the daemon default; sqlite is opt-in via env.
   local env_line=""
@@ -1133,7 +1139,7 @@ Group=xeqm
 StateDirectory=xeqm/${snode_name}
 StateDirectoryMode=0700
 WorkingDirectory=${data_dir}${env_line}
-ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${sibling_anchors}${opt_log_level_arg}${lokinet_control_arg}
+ExecStart=/opt/xeqm/bin/xeqm-d --non-interactive --data-dir=${data_dir} --service-node --p2p-bind-ip=0.0.0.0 --p2p-bind-port=${p2p} --rpc-admin=127.0.0.1:${rpc} --quorumnet-port=${qnet} --service-node-public-ip=${public_ip} --seed-node=seeds.xeqmlabs.com:9230 --add-priority-node=seed-1.xeqmlabs.com:9230 --add-priority-node=seed-2.xeqmlabs.com:9230 --add-priority-node=seed-3.xeqmlabs.com:9230 --add-priority-node=seed-4.xeqmlabs.com:9230 --add-priority-node=seed-5.xeqmlabs.com:9230${sibling_anchors}${opt_log_level_arg}${sidecar_control_arg}
 Restart=always
 RestartSec=15s
 TimeoutStartSec=300s
@@ -1281,6 +1287,141 @@ place_lokinet_bootstrap() {
     echo -e "  \033[0;33mwarning: could not obtain lokinet bootstrap RC from '${bootstrap_src}' for '${snode_name}'.\033[0m"
     echo -e "  \033[0;33m         Config is written; doctor will flag the missing ${dest}.\033[0m"
   fi
+}
+
+# ── Session Router sidecar (opt-in, non-enforcing) ────────────────────────────
+# The current routing layer, one SR relay per service node, keyed to that SN's
+# identity over the daemon's oxend lmq-local-control socket. Private network,
+# netid=xeqm. This replaced the classic lokinet relay at the 2026-11-04 fleet
+# cutover; lokinet above is retained only for legacy hosts. Linux/systemd only;
+# on macOS these functions are a no-op (the relay needs /dev/net/tun).
+#
+# Port convention mirrors the fleet cutover tooling: the SR UDP port is the
+# lokinet link port (1090+idx) + 100 = 1190+idx. The interface is sr-<idx>. The
+# bootstrap RC is shared across this host's SNs at a single fixed path, unlike
+# lokinet's per-SN copy.
+_SR_BIN="/opt/xeqm/bin/session-router"
+_SR_CONF_DIR="/etc/xeqm-session-router"
+_SR_STATE_BASE="/var/lib/xeqm-session-router"
+_SR_BOOTSTRAP_FILE="/var/lib/xeqm-session-router/bootstrap.signed"
+# Convention URL; publish the signed RC list here (not yet live — see runbook).
+_SESSION_ROUTER_DEFAULT_BOOTSTRAP="https://bootstrap.xeqmlabs.com/session-router-bootstrap.signed"
+
+# write_session_router_config <snodeName> <idx> <public_ip>
+# Writes /etc/xeqm-session-router/<snodeName>.ini for this SN's SR relay. The
+# bootstrap RC is placed separately (shared) by place_session_router_bootstrap;
+# the config only references its fixed path.
+write_session_router_config() {
+  local snode_name="$1"
+  local idx="$2"
+  local public_ip="$3"
+
+  if [[ "${OS_TYPE}" == "Darwin" ]]; then
+    echo -e "  \033[0;33mSession Router is Linux-only, skipping config for '${snode_name}' on macOS.\033[0m"
+    return 0
+  fi
+
+  local sr_port=$(( 1190 + idx ))
+  local state_dir="${_SR_STATE_BASE}/${snode_name}"
+  local conf_file="${_SR_CONF_DIR}/${snode_name}.ini"
+
+  ${_SUDO} mkdir -p "${_SR_CONF_DIR}" "${state_dir}"
+  ${_SUDO} chown xeqm:xeqm "${state_dir}"
+
+  ${_SUDO} tee "${conf_file}" > /dev/null <<EOF
+[router]
+netid=xeqm
+data-dir=${state_dir}
+public-ip=${public_ip}
+public-port=${sr_port}
+[network]
+ifname=sr-${idx}
+[bind]
+listen=0.0.0.0:${sr_port}
+[oxend]
+rpc=ipc:///var/lib/xeqm/${snode_name}/oxend.sock
+[bootstrap]
+add-node=${_SR_BOOTSTRAP_FILE}
+[logging]
+type=print
+level=warn
+EOF
+
+  echo -e "  Session Router config written: ${conf_file}  (relay ${sr_port}/udp, ifname sr-${idx})"
+}
+
+# install_session_router_template_unit : writes the xeqm-session-router@.service
+# template unit once (instance = snode name, e.g. xeqm-session-router@snode1).
+# Safe to call repeatedly. Matches the unit deployed across the fleet.
+install_session_router_template_unit() {
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local unit_file="/etc/systemd/system/xeqm-session-router@.service"
+  # Quoted heredoc: %i is a systemd instance specifier and must stay literal.
+  ${_SUDO} tee "${unit_file}" > /dev/null <<'EOF'
+[Unit]
+Description=XEQM Session Router relay (%i)
+After=network-online.target xeqmnode_%i.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=xeqm
+Group=xeqm
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+DeviceAllow=/dev/net/tun rw
+ExecStart=/opt/xeqm/bin/session-router -r -c /etc/xeqm-session-router/%i.ini
+Restart=on-failure
+RestartSec=10
+StateDirectory=xeqm-session-router/%i
+ReadWritePaths=/var/lib/xeqm-session-router/%i
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  echo -e "  Session Router template unit written: ${unit_file}"
+}
+
+# place_session_router_bootstrap <bootstrap_src>
+# Fetches (curl/wget) or copies the signed RC list into the SHARED SR bootstrap
+# path for this host. Warns but does not fail when the RC cannot be obtained; the
+# config is still written and doctor flags the missing RC. Idempotent, so it is
+# safe to call once per SN.
+place_session_router_bootstrap() {
+  local bootstrap_src="${1:-${_SESSION_ROUTER_DEFAULT_BOOTSTRAP}}"
+
+  [[ "${OS_TYPE}" == "Darwin" ]] && return 0
+
+  local dest="${_SR_BOOTSTRAP_FILE}"
+  ${_SUDO} mkdir -p "${_SR_STATE_BASE}"
+
+  local _ok=0
+  case "${bootstrap_src}" in
+    http://*|https://*)
+      if command -v curl >/dev/null 2>&1; then
+        ${_SUDO} curl -fsSL -o "${dest}" "${bootstrap_src}" && _ok=1 || true
+      elif command -v wget >/dev/null 2>&1; then
+        ${_SUDO} wget -q -O "${dest}" "${bootstrap_src}" && _ok=1 || true
+      fi
+      ;;
+    *)
+      if [[ -f "${bootstrap_src}" ]]; then
+        ${_SUDO} cp -f "${bootstrap_src}" "${dest}" && _ok=1 || true
+      fi
+      ;;
+  esac
+
+  if [[ "${_ok}" -eq 1 ]] && ${_SUDO} test -s "${dest}"; then
+    ${_SUDO} chown xeqm:xeqm "${dest}"
+    echo -e "  Session Router bootstrap placed: ${dest}"
+    return 0
+  fi
+
+  echo -e "  \033[0;33mwarning: could not obtain Session Router bootstrap RC from '${bootstrap_src}'.\033[0m"
+  echo -e "  \033[0;33m         The signed RC list is not published at the convention URL yet; pass\033[0m"
+  echo -e "  \033[0;33m         --session-router-bootstrap <path|url> with the fleet RC, or place it at\033[0m"
+  echo -e "  \033[0;33m         ${dest} before starting the relay. Config is written; doctor flags it.\033[0m"
+  return 1
 }
 
 download_release_binaries() {
