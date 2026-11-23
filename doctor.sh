@@ -290,12 +290,14 @@ analyze_and_fix() {
   fi
   local -a healthy_blockchains=() stuck_blockchains=() nodata_blockchains=()
   local -a lokinet_broken=()
+  local -a srouter_broken=()
 
   # ── Collect per-node data ─────────────────────────────────────────────────
   local -a d_name=() d_svc=() d_chain_state=() d_chain_col=()
   local -a d_key=() d_fw_state=() d_disk_ok=() d_disk_gb=() d_lmdb_gb=()
   local -a d_issues=() d_reg=() d_peers=() d_uptime=() d_ram_mb=()
   local -a d_lokinet=()
+  local -a d_srouter=()
 
   local _total_nodes="${#node_names[@]}" _node_idx=0
   for i in "${!node_names[@]}"; do
@@ -601,6 +603,48 @@ analyze_and_fix() {
       [[ "${_lok_needs_repair}" -eq 1 ]] && lokinet_broken+=( "${i}" )
     fi
 
+    # ─ Session Router sidecar (current routing layer, non-enforcing) ─
+    # Configured = per-SN .ini + the shared template unit both present. When
+    # configured, check the unit is active, the host-shared bootstrap RC is in
+    # place, and the daemon is advertising a non-zero session_router_version in
+    # its uptime proof. The SR binary ships separately from the core bundle, so
+    # a missing binary surfaces here as an inactive unit.
+    local sr_state="none" _sr_needs_repair=0
+    local _sr_conf="/etc/xeqm-session-router/${_nname}.ini"
+    local _sr_tmpl="/etc/systemd/system/xeqm-session-router@.service"
+    local _sr_boot="/var/lib/xeqm-session-router/bootstrap.signed"
+    if [[ "${OS_TYPE}" != "Darwin" && -f "${_sr_conf}" && -f "${_sr_tmpl}" ]]; then
+      sr_state="ok"
+      if ! systemctl is-active --quiet "xeqm-session-router@${_nname}" 2>/dev/null; then
+        sr_state="fail"; _sr_needs_repair=1
+        node_issue_text+="Session Router relay not running\n"
+        if ! sudo test -x /opt/xeqm/bin/session-router 2>/dev/null; then
+          node_issue_text+="# session-router binary missing at /opt/xeqm/bin/session-router (ships separately from the core release)\n"
+        fi
+        node_issue_text+="→ sudo systemctl restart xeqm-session-router@${_nname}\n\n"
+      fi
+      if [[ ! -f "${_sr_boot}" ]]; then
+        [[ "${sr_state}" = "ok" ]] && sr_state="warn"
+        _sr_needs_repair=1
+        node_issue_text+="# Session Router bootstrap RC missing, relay cannot find the private network\n"
+        node_issue_text+="#   ${_sr_boot}\n\n"
+      fi
+      if [[ "${chain_state}" = "ok" && -n "${_nrpc}" && -n "${sn_key}" ]]; then
+        local _sr_json _sr_ver
+        _sr_json=$(curl -s -m 5 "http://127.0.0.1:${_nrpc}/json_rpc" \
+          -X POST -H 'Content-Type: application/json' \
+          -d "{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"get_service_nodes\",\
+\"params\":{\"service_node_pubkeys\":[\"${sn_key}\"]}}" 2>/dev/null) || true
+        _sr_ver=$(echo "${_sr_json}" | grep -o '"session_router_version":\[[0-9]*,[0-9]*,[0-9]*\]' \
+          | head -1 | grep -o '[0-9]*,[0-9]*,[0-9]*' || true)
+        if [[ -z "${_sr_ver}" || "${_sr_ver}" = "0,0,0" ]]; then
+          [[ "${sr_state}" = "ok" ]] && sr_state="warn"
+          node_issue_text+="# Session Router version not yet advertised in uptime proof (relay may still be starting)\n\n"
+        fi
+      fi
+      [[ "${_sr_needs_repair}" -eq 1 ]] && srouter_broken+=( "${i}" )
+    fi
+
     d_name+=( "${_nname}" )
     d_svc+=( "${svc_state}" )
     d_chain_state+=( "${chain_state}" )
@@ -616,6 +660,7 @@ analyze_and_fix() {
     d_uptime+=( "${uptime_str}" )
     d_ram_mb+=( "${ram_mb}" )
     d_lokinet+=( "${lok_state}" )
+    d_srouter+=( "${sr_state}" )
   done
   printf "\r%-70s\r" ""
 
@@ -1003,6 +1048,54 @@ analyze_and_fix() {
           echo -e "  \033[0;32mRestarted\033[0m xeqm-lokinet@${_lname}, re-run doctor to confirm"
         else
           echo -e "  \033[0;31mWARN: xeqm-lokinet@${_lname} failed to start, check journalctl\033[0m"
+        fi
+      done
+    fi
+  fi
+
+  # ── Session Router sidecar repair ─────────────────────────────────────────
+  # Repair = (re)write the config from the existing one + restart the relay. idx
+  # and public-ip are recovered from the current .ini (public-port = 1190+idx).
+  if [[ "${#srouter_broken[@]}" -gt 0 ]]; then
+    echo ""
+    tput rev 2>/dev/null || true
+    printf "\033[1m  SESSION ROUTER SIDECAR REPAIR  \033[0m\n"
+    tput sgr0 2>/dev/null || true
+    local _do_sr_fix=1
+    if [[ "${doctor_config[fix_mode]}" = "interactive" ]]; then
+      if wt_available; then
+        local _sr_list=""
+        for _si in "${srouter_broken[@]}"; do _sr_list+="${node_names[$_si]} "; done
+        wt_yesno "Repair Session Router Relays" \
+          "These Session Router relays need attention:\n\n  ${_sr_list}\nRewrite each config and restart the relay now?" \
+          12 66 "Repair" "Skip" || _do_sr_fix=0
+      else
+        local _yn
+        read -rp $'\n\033[1mRepair Session Router relay(s) now?\e[0m [Y/n]: ' _yn
+        _yn="${_yn:-Y}"
+        [[ "${_yn,,}" != "y" ]] && _do_sr_fix=0
+      fi
+    fi
+    if [[ "${_do_sr_fix}" -eq 1 ]]; then
+      for _si in "${srouter_broken[@]}"; do
+        local _sname="${node_names[$_si]}"
+        local _sconf="/etc/xeqm-session-router/${_sname}.ini"
+        local _sport _sidx _sip
+        _sport=$(grep -m1 '^public-port=' "${_sconf}" 2>/dev/null | cut -d= -f2 || true)
+        _sip=$(grep -m1 '^public-ip=' "${_sconf}" 2>/dev/null | cut -d= -f2 || true)
+        if [[ -n "${_sport}" ]]; then _sidx=$(( _sport - 1190 )); else _sidx=1; fi
+        echo -e "\n\033[1mRepairing Session Router relay for '${_sname}'...\033[0m"
+        write_session_router_config "${_sname}" "${_sidx}" "${_sip}"
+        install_session_router_template_unit
+        [[ ! -f "/var/lib/xeqm-session-router/bootstrap.signed" ]] && \
+          place_session_router_bootstrap "${_SESSION_ROUTER_DEFAULT_BOOTSTRAP}"
+        sudo systemctl daemon-reload
+        if ! sudo test -x /opt/xeqm/bin/session-router 2>/dev/null; then
+          echo -e "  \033[0;33mWARN: /opt/xeqm/bin/session-router missing (ships separately); stage it, then restart.\033[0m"
+        elif sudo systemctl restart "xeqm-session-router@${_sname}" 2>/dev/null; then
+          echo -e "  \033[0;32mRestarted\033[0m xeqm-session-router@${_sname}, re-run doctor to confirm"
+        else
+          echo -e "  \033[0;31mWARN: xeqm-session-router@${_sname} failed to start, check journalctl\033[0m"
         fi
       done
     fi
