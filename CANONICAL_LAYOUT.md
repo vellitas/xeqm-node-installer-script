@@ -181,7 +181,83 @@ The annotated form above is for readability only.
 
 ---
 
-## Lokinet sidecar (opt-in, non-enforcing)
+## Session Router sidecar (current routing layer, opt-in, non-enforcing)
+
+Session Router (SR) is the current routing sidecar. It replaced the classic lokinet
+relay (below) at the 2026-11-04 fleet cutover. Support is opt-in and off by default.
+When enabled, each service node gets its own SR relay running as a sidecar, keyed to
+that SN. This is ops and packaging only. Nothing about it is consensus-critical, and a
+relay that is down does not affect the service node, its proofs, or Pulse.
+
+Enable it at install time with `install.sh --session-router`. The bootstrap RC source
+can be overridden with `install.sh --session-router --session-router-bootstrap <path-or-url>`.
+It is mutually exclusive with `--lokinet`. This is Linux and systemd only; on macOS the
+installer skips SR with a warning and emits no plist.
+
+**How the relay gets its identity.** The relay reads the SN identity from the daemon
+over the oxend `lmq-local-control` socket rather than from any key file, and pings
+`admin.session_router_ping` about every 30s. When SR is enabled, the installer adds
+`--lmq-local-control=ipc:///var/lib/xeqm/<snodeName>/oxend.sock` to that SN's
+`ExecStart` **before the daemon's first start**, so the socket exists when the sidecar
+attaches and no daemon restart is needed. The relay config points `[oxend] rpc` at the
+same socket. There is no SR key file to back up or manage.
+
+**Two failure modes the installer avoids.** Adding SR to a daemon that was created
+without the `--lmq-local-control` flag strands the node: the socket never appears, the
+sidecar fails, and `session_router_version` stays `[0,0,0]`. And the sidecar must be
+`enable`d, not merely `start`ed — a `start`-only relay does not return after a reboot
+or daemon restart and the node's SR version silently decays back to `[0,0,0]`. The
+installer writes the flag up front and runs `systemctl enable --now`, handling both.
+
+**Binary distribution.** The `session-router` binary is built from the Session Router
+fork and ships separately from the `xeqm-core` release bundle, so the installer's
+GitHub binary step does not fetch it. If `/opt/xeqm/bin/session-router` is absent when
+`--session-router` runs, the installer still writes the config and unit and prints the
+command to finish once the arch-matched binary is staged there. Both amd64 and arm64
+binaries are validated.
+
+**User model.** The relay runs as `User=xeqm` `Group=xeqm`, the same service user as
+the SN, so it can read the xeqm-owned socket inside the 0700 data directory. It needs
+`CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (via `AmbientCapabilities`) and
+`DeviceAllow=/dev/net/tun rw`, because it brings up a tun device.
+
+**Private network.** All relays join a private network with `netid=xeqm`. Each relay
+bootstraps from a single host-shared `add-node=/var/lib/xeqm-session-router/bootstrap.signed`
+(unlike lokinet's per-SN copy), placed by the installer from the
+`--session-router-bootstrap` source. The default convention URL is not yet published;
+until it is, supply the RC with the flag or place it at that path. If the RC cannot be
+obtained the installer warns but still writes the config.
+
+**Files and ports.** Per service node, indexed by the install order `idx` (1..N):
+
+| Item | Location / value |
+|------|------------------|
+| Config | `/etc/xeqm-session-router/<snodeName>.ini` |
+| State dir | `/var/lib/xeqm-session-router/<snodeName>` |
+| Bootstrap RC (shared) | `/var/lib/xeqm-session-router/bootstrap.signed` |
+| Template unit | `/etc/systemd/system/xeqm-session-router@.service` (instance `xeqm-session-router@<snodeName>`) |
+| Interface | `sr-<idx>` |
+| Relay port (`[bind] listen` + `public-port`) | `1190 + idx` (UDP, opened in the firewall) |
+
+The relay UDP port is the only SR port opened to the outside. When the firewall is
+managed by the installer it opens `1190+idx/udp`. OCI hosts also need the VCN Security
+List and the raw iptables rule opened, the same way the SN ports are handled in the
+firewall module. OCI hosts that cannot form the outbound mesh still report a valid
+`[1,1,0]` because the local admin-socket ping is all the non-enforcing signal needs.
+
+**Advertisement.** Once the relay is pinging, the daemon's `srouter_version` is set and
+propagates to the network via the node's next uptime proof (~1h), at which point the
+network-visible `session_router_version` in `get_service_nodes` flips `[0,0,0]`→`[1,1,0]`.
+`get_info` exposes `last_session_router_ping` (0 = not pinging) for a local check within
+~15s of start.
+
+---
+
+## Lokinet sidecar (legacy, superseded by Session Router)
+
+> **Legacy.** Lokinet was the routing sidecar before Session Router (above) replaced it
+> at the 2026-11-04 cutover. It is retained for legacy hosts and is mutually exclusive
+> with `--session-router`. New installs should use Session Router.
 
 Lokinet support is opt-in and off by default. When enabled, each service node gets
 its own lokinet relay running as a sidecar, keyed to that SN. This is ops and

@@ -401,17 +401,66 @@ Quorumnet is derived automatically as P2P+2 per node.
 bash install.sh --version core-v1.0.7
 ```
 
-### Lokinet relay sidecar (opt-in, Linux only)
+### Session Router relay sidecar (opt-in, Linux only)
 
-Off by default. When enabled, each service node runs its own lokinet relay as a
-sidecar on a private network (netid `xeqm`), keyed to that SN over its oxend control
-socket. This is non-enforcing ops and packaging only, so a relay being down does not
-affect the service node.
+Off by default. When enabled, each service node runs its own Session Router (SR)
+relay as a sidecar on a private network (netid `xeqm`), keyed to that SN over the
+daemon's oxend `lmq-local-control` socket. SR is the **current routing layer**; it
+replaced the classic lokinet relay at the 2026-11-04 fleet cutover. It is
+non-enforcing (an adoption signal only), so a relay being down does not affect the
+service node, its proofs, or consensus.
+
+```bash
+bash install.sh --session-router                                             # enable, default bootstrap RC
+bash install.sh --session-router --session-router-bootstrap /path/to/session-router-bootstrap.signed
+bash install.sh --session-router --session-router-bootstrap https://example.com/session-router-bootstrap.signed
+```
+
+Per node, by install index `idx` (1..N), the relay UDP port `1190+idx/udp` is opened
+in the firewall. Config lives at `/etc/xeqm-session-router/<snode>.ini`, state at
+`/var/lib/xeqm-session-router/<snode>`, the bootstrap RC is shared across the host at
+`/var/lib/xeqm-session-router/bootstrap.signed`, and the relay runs under the template
+unit `xeqm-session-router@<snode>`. See CANONICAL_LAYOUT.md for the full design.
+
+Two things the installer handles that are easy to get wrong by hand:
+
+- **The admin socket must exist before the sidecar starts.** When SR is enabled, the
+  installer writes `--lmq-local-control=ipc:///var/lib/xeqm/<snode>/oxend.sock` into
+  the daemon unit up front, so the socket is present on the first daemon start and the
+  sidecar attaches with no later daemon restart. Adding SR to a node that was created
+  without this flag is what otherwise strands it without a reporting sidecar.
+- **The sidecar is enabled, not just started.** The installer runs
+  `systemctl enable --now`, so the relay comes back after a reboot or a daemon
+  restart. A `start`-only relay silently decays the node's `session_router_version`
+  back to `[0,0,0]` on the next restart.
+
+The `session-router` binary ships **separately** from the `xeqm-core` release bundle
+(it is built from the Session Router fork), so it is not downloaded by the installer's
+GitHub binary step. If `/opt/xeqm/bin/session-router` is absent when `--session-router`
+runs, the installer writes the config and unit, then prints the one command to finish
+once the arch-matched binary is staged:
+
+```bash
+sudo install -m0755 /path/to/session-router /opt/xeqm/bin/session-router
+sudo systemctl enable --now xeqm-session-router@<snode>
+```
+
+The default bootstrap source is a convention URL
+(`https://bootstrap.xeqmlabs.com/session-router-bootstrap.signed`) that is **not yet
+published**; until it is, pass `--session-router-bootstrap <path|url>` with the signed
+RC list, or place it at `/var/lib/xeqm-session-router/bootstrap.signed` before starting
+the relay.
+
+### Lokinet relay sidecar (legacy, opt-in, Linux only)
+
+Retired as the fleet routing layer at the 2026-11-04 Session Router cutover; retained
+for legacy hosts only. Mutually exclusive with `--session-router`. When enabled, each
+service node runs its own lokinet relay (netid `xeqm`), keyed to that SN over its oxend
+control socket, non-enforcing.
 
 ```bash
 bash install.sh --lokinet                                   # enable, default bootstrap RC
 bash install.sh --lokinet --lokinet-bootstrap /path/to/lokinet-bootstrap.signed
-bash install.sh --lokinet --lokinet-bootstrap https://example.com/lokinet-bootstrap.signed
 ```
 
 Per node, by install index `idx` (1..N), the link port `1090+idx/udp` is opened in
